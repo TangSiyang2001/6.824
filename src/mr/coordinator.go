@@ -1,15 +1,87 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
+//master kept task states
+//<-------------------------------------
+type TaskState int
+
+const (
+	Idle TaskState = iota
+	InProgress
+	Completed
+)
+
+//------------------------------------->
+
+//task
+//<-------------------------------------
+type TaskType int
+
+const (
+	Map TaskType = iota
+	Reduce
+)
+
+type TaskRet int
+
+const (
+	Success TaskRet = iota
+	Failed
+)
+
+type TaskId int
+
+//map or reduce task
+type Task struct {
+	Id        TaskId
+	Type      TaskType
+	State     TaskState
+	Ret       *TaskRet
+	InputFile string
+}
+
+//------------------------------------->
+
+//task,map or reduce task
+//<-------------------------------------
+type WorkerId int
+
+type TaskMeta struct {
+	WorkerId  *WorkerId
+	StartTime *time.Time
+	EndTime   *time.Time
+	TaskRef   *Task
+}
+
+//------------------------------------->
+
+type Phase int
+
+const (
+	MapPhase Phase = iota
+	ReducePhase
+	CompletedPhase
+)
+
+type TaskIdSeed int
 
 type Coordinator struct {
-	// Your definitions here.
-
+	InputFiles    []string
+	NReduce       int
+	TaskQueue     chan *Task
+	ExcecutePhase Phase
+	TaskMapper    map[TaskId]*TaskMeta
+	TaskIdSeed    TaskId
+	mu            sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -23,7 +95,6 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -46,12 +117,39 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ExcecutePhase == CompletedPhase
+}
 
-	// Your code here.
+func (c *Coordinator) generateTaskId() TaskId {
+	c.TaskIdSeed++
+	return c.TaskIdSeed
+}
 
+func (c *Coordinator) createMapTask(files []string) {
+	for _, file := range files {
+		task := Task{
+			Id:        c.generateTaskId(),
+			Type:      Map,
+			State:     Idle,
+			InputFile: file,
+		}
+		c.TaskQueue <- &task
+		now := time.Now()
+		meta := TaskMeta{
+			StartTime: &now,
+			TaskRef:   &task,
+		}
+		c.TaskMapper[task.Id] = &meta
+	}
+}
 
-	return ret
+func max(left int, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 //
@@ -60,11 +158,15 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
-
+	c := Coordinator{
+		InputFiles:    files,
+		NReduce:       nReduce,
+		TaskQueue:     make(chan *Task, max(len(files), nReduce)),
+		ExcecutePhase: MapPhase,
+		TaskMapper:    make(map[TaskId]*TaskMeta),
+	}
 
 	c.server()
+	//TODO:check out timeout
 	return &c
 }

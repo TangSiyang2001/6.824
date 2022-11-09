@@ -6,13 +6,29 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"fmt"
+	"log"
+	"net/rpc"
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
 // and reply for an RPC.
 //
+
+type MsgId int
+
+var reqIdGen = IncreasingIdGen{
+	seed: 0,
+}
+
+//------------------------------------->
+//heart beat
+
+//<-------------------------------------
 
 type ExampleArgs struct {
 	X int
@@ -24,6 +40,32 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type TaskReqArg struct {
+	WorkerId WorkerId
+	ReqId    MsgId
+}
+
+func MakeTaskArg(workerId WorkerId) TaskReqArg {
+	return TaskReqArg{
+		WorkerId: workerId,
+		ReqId:    MsgId(reqIdGen.GenerateId()),
+	}
+}
+
+type TaskReqReply struct {
+	Task   Task
+	RespId MsgId
+}
+
+type TaskReportArg struct {
+	WorkerId
+	ReqId MsgId
+	Task
+}
+
+type TaskReportReply struct {
+	RespId MsgId
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
@@ -33,4 +75,27 @@ func coordinatorSock() string {
 	s := "/var/tmp/824-mr-"
 	s += strconv.Itoa(os.Getuid())
 	return s
+}
+
+//
+// send an RPC request to the coordinator, wait for the response.
+// usually returns true.
+// returns false if something goes wrong.
+//
+func call(rpcname string, args interface{}, reply interface{}) bool {
+	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	sockname := coordinatorSock()
+	c, err := rpc.DialHTTP("unix", sockname)
+	if err != nil {
+		log.Fatal("dialing:", err)
+	}
+	defer c.Close()
+
+	err = c.Call(rpcname, args, reply)
+	if err == nil {
+		return true
+	}
+
+	fmt.Println(err)
+	return false
 }

@@ -49,11 +49,14 @@ type Task struct {
 	InputFile string
 }
 
+var taskIdGen = IncreasingIdGen{
+	seed: 0,
+}
+
 //------------------------------------->
 
 //task,map or reduce task
 //<-------------------------------------
-type WorkerId int
 
 type TaskMeta struct {
 	WorkerId  *WorkerId
@@ -67,24 +70,84 @@ type TaskMeta struct {
 type Phase int
 
 const (
-	MapPhase Phase = iota
+	InitialPhase Phase = iota
+	MapPhase
 	ReducePhase
 	CompletedPhase
 )
 
-type TaskIdSeed int
-
 type Coordinator struct {
 	InputFiles    []string
 	NReduce       int
-	TaskQueue     chan *Task
-	ExcecutePhase Phase
-	TaskMapper    map[TaskId]*TaskMeta
-	TaskIdSeed    TaskId
+	taskQueue     chan *Task
+	excecutePhase Phase
+	taskMetaMap   map[TaskId]*TaskMeta
+	idGenerator   IdGenerator
 	mu            sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
+func (c *Coordinator) AssignTask(taskReq *TaskReqArg, taskResp *TaskReqReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.taskQueue) == 0 {
+		//not task to do at that moment
+		return nil
+	}
+	task := *<-c.taskQueue
+	c.updateTaskMeta(taskReq.WorkerId, task)
+	taskResp.Task = task
+	taskResp.RespId = taskReq.ReqId
+	//follow each assgined task
+	go c.scanTaskStat(task.Id)
+	return nil
+}
+
+func (c *Coordinator) HandleTaskReport(req *TaskReportArg, resp *TaskReportReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	task := req.Task
+	c.updateTaskMeta(req.WorkerId, task)
+	resp.RespId = req.ReqId
+	return nil
+}
+
+func (c *Coordinator) updateTaskMeta(workerId WorkerId, task Task) {
+	meta := c.taskMetaMap[task.Id]
+	taskRet := task.Ret
+
+	if orgTaskRet := meta.TaskRef.Ret; orgTaskRet != nil && *orgTaskRet == Success {
+		//task has successfully finished
+		return
+	}
+	now := time.Now()
+	if taskRet == nil {
+		meta.StartTime = &now
+		meta.WorkerId = &workerId
+	} else {
+		meta.EndTime = &now
+		meta.TaskRef.State = task.State
+		meta.TaskRef.Ret = task.Ret
+	}
+	c.taskMetaMap[task.Id] = meta
+}
+
+var mu sync.Mutex
+func (c *Coordinator) scanTaskStat(taskId TaskId) {
+	mu.Lock()
+	defer mu.Unlock()
+	for {
+		time.Sleep(time.Second * 10)
+		meta := c.taskMetaMap[taskId]
+		task := meta.TaskRef
+		if task.State == InProgress {
+			//reset task stat
+			task.State = Idle
+			meta.WorkerId = nil
+			c.taskMetaMap[taskId] = meta
+		}
+	}
+}
 
 //
 // an example RPC handler.
@@ -119,37 +182,29 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.ExcecutePhase == CompletedPhase
+	return c.excecutePhase == CompletedPhase
 }
 
-func (c *Coordinator) generateTaskId() TaskId {
-	c.TaskIdSeed++
-	return c.TaskIdSeed
-}
-
-func (c *Coordinator) createMapTask(files []string) {
-	for _, file := range files {
+func (c *Coordinator) initTasks() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.excecutePhase != InitialPhase {
+		return
+	}
+	for _, file := range c.InputFiles {
 		task := Task{
-			Id:        c.generateTaskId(),
+			Id:        TaskId(c.idGenerator.GenerateId()),
 			Type:      Map,
 			State:     Idle,
 			InputFile: file,
 		}
-		c.TaskQueue <- &task
-		now := time.Now()
+		c.taskQueue <- &task
 		meta := TaskMeta{
-			StartTime: &now,
-			TaskRef:   &task,
+			TaskRef: &task,
 		}
-		c.TaskMapper[task.Id] = &meta
+		c.taskMetaMap[task.Id] = &meta
 	}
-}
-
-func max(left int, right int) int {
-	if left > right {
-		return left
-	}
-	return right
+	c.excecutePhase = MapPhase
 }
 
 //
@@ -161,12 +216,17 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		InputFiles:    files,
 		NReduce:       nReduce,
-		TaskQueue:     make(chan *Task, max(len(files), nReduce)),
-		ExcecutePhase: MapPhase,
-		TaskMapper:    make(map[TaskId]*TaskMeta),
+		taskQueue:     make(chan *Task, max(len(files), nReduce)),
+		excecutePhase: MapPhase,
+		taskMetaMap:   make(map[TaskId]*TaskMeta),
+		idGenerator: &IncreasingIdGen{
+			seed: 0,
+		},
 	}
 
+	c.initTasks()
 	c.server()
 	//TODO:check out timeout
+	//TODO:heart beat
 	return &c
 }

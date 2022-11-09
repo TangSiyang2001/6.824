@@ -1,7 +1,11 @@
 package mr
 
-import "fmt"
-import "hash/fnv"
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -10,8 +14,6 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
-
-type WorkerId int
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -28,12 +30,83 @@ func ihash(key string) int {
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	workerId := RegWorker()
+	for {
+		retry := 0
+		//will block if it needs to wait
+		resp := ReqForTask(workerId)
+		if resp == nil && retry < 3 {
+			retry++
+			time.Sleep(time.Microsecond * 100)
+			continue
+		}
+		if retry == 3 || resp.jobFinishedSig {
+			//retry for three times,if not work,worker quit
+			break
+		}
 
-	// Your worker implementation here.
+		var err error
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+		switch resp.Task.Type {
+		case Map:
+			err = DoMap(mapf, &resp.Task)
+		case Reduce:
+			err = DoReduce(reducef, &resp.Task)
+		default:
+			panic("unkonwn task")
+		}
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+		ReportTaskFinished(workerId, &resp.Task)
+	}
 
+}
+
+func RegWorker() WorkerId {
+	req := MakeWorkerRegArgs()
+	resp := WorkerRegReply{}
+	ok := call("Coordinator.HandleWorkerReg", &req, &resp)
+	handleRpcResp(req.ReqId, ok)
+	return resp.WorkerId
+}
+
+func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
+	//TODO:implement
+	return nil
+}
+
+func DoReduce(reducef func(string, []string) string, task *Task) error {
+	//TODO:implement
+	return nil
+}
+
+func ReqForTask(workerId WorkerId) *TaskReqReply {
+	//async
+	req := MakeTaskArg(workerId)
+	resp := TaskReqReply{}
+	ok := call("Coordinator.HandleTaskAssginment", &req, &resp)
+	handleRpcResp(req.ReqId, ok)
+	if ok {
+		return &resp
+	}
+	return nil
+}
+
+func ReportTaskFinished(workerId WorkerId, task *Task) {
+	task.State = Completed
+	req := MakeReportArgs(workerId, task)
+	resp := TaskReportReply{}
+	ok := call("Coordinator.HandleTaskReport", &req, &resp)
+	handleRpcResp(req.ReqId, ok)
+}
+
+func handleRpcResp(msgId MsgId, succ bool) {
+	if succ {
+		fmt.Printf("msg %v recieved.\n", msgId)
+	} else {
+		log.Fatalf("RPC failed ,msg %v.\n", msgId)
+	}
 }
 
 //

@@ -40,31 +40,55 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
-type TaskReqArg struct {
+type TaskReqArgs struct {
 	WorkerId WorkerId
 	ReqId    MsgId
 }
 
-func MakeTaskArg(workerId WorkerId) TaskReqArg {
-	return TaskReqArg{
+func MakeTaskArg(workerId WorkerId) TaskReqArgs {
+	return TaskReqArgs{
 		WorkerId: workerId,
 		ReqId:    MsgId(reqIdGen.GenerateId()),
 	}
 }
 
 type TaskReqReply struct {
-	Task   Task
-	RespId MsgId
+	Task           Task
+	jobFinishedSig bool
+	RespId         MsgId
 }
 
-type TaskReportArg struct {
+type TaskReportArgs struct {
 	WorkerId
 	ReqId MsgId
 	Task
 }
 
+func MakeReportArgs(workerId WorkerId, task *Task) TaskReportArgs {
+	return TaskReportArgs{
+		WorkerId: workerId,
+		ReqId:    MsgId(reqIdGen.GenerateId()),
+		Task:     *task,
+	}
+}
+
 type TaskReportReply struct {
 	RespId MsgId
+}
+
+type WorkerRegArgs struct {
+	ReqId MsgId
+}
+
+func MakeWorkerRegArgs() WorkerRegArgs {
+	return WorkerRegArgs{
+		ReqId: MsgId(reqIdGen.GenerateId()),
+	}
+}
+
+type WorkerRegReply struct {
+	RespId MsgId
+	WorkerId
 }
 
 // Cook up a unique-ish UNIX-domain socket name

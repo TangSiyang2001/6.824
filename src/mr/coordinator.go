@@ -2,6 +2,7 @@ package mr
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -36,10 +37,10 @@ type TaskId int
 
 //map or reduce task
 type Task struct {
-	Id            TaskId
-	Type          TaskType
-	State         TaskState
-	InputFileName []string
+	Id         TaskId
+	Type       TaskType
+	State      TaskState
+	InputFiles []string
 }
 
 var taskIdGen = IncreasingIdGen{
@@ -87,8 +88,6 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) HandleWorkerReg(regReq *WorkerRegArgs, regResp *WorkerRegReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if regReq == nil || regResp == nil {
 		return errors.New("req or resp ptr should be non nil")
 	}
@@ -100,7 +99,6 @@ func (c *Coordinator) HandleWorkerReg(regReq *WorkerRegArgs, regResp *WorkerRegR
 }
 
 func (c *Coordinator) HandleTaskAssginment(taskReq *TaskReqArgs, taskResp *TaskReqReply) error {
-	c.mu.Lock()
 	if taskReq == nil || taskResp == nil {
 		return errors.New("req or resp ptr should be non nil")
 	}
@@ -110,45 +108,48 @@ func (c *Coordinator) HandleTaskAssginment(taskReq *TaskReqArgs, taskResp *TaskR
 		return nil
 	}
 	//will blok until has tasks to dispatch
-	task := *<-c.taskQueue
+	task := <-c.taskQueue
 	c.updateTaskMeta(taskReq.WorkerId, task)
 	taskResp.jobFinishedSig = false
-	taskResp.Task = task
+	taskResp.Task = *task
 	//follow each assgined task,if timeout,assgin to another worker
 	//The coordinator should notice if a worker hasn't completed its task in a reasonable amount of time
 	//(for this lab, use ten seconds)
-	c.mu.Unlock()
 	go c.scanTaskStat(task.Id)
 	return nil
 }
 
 func (c *Coordinator) HandleTaskReport(req *TaskReportArgs, resp *TaskReportReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	task := req.Task
 	//TODO:check if the map phase has finished
-	c.updateTaskMeta(req.WorkerId, task)
-	c.handleRetpaths(&req.RetPaths)
-	c.checkPhase()
+	c.updateTaskMeta(req.WorkerId, &task)
+	c.handleRetpaths(req.RetPaths)
+	go c.checkPhase()
 	resp.RespId = req.ReqId
 	return nil
 }
 
-func (c *Coordinator) handleRetpaths(paths *[]string) {
+func (c *Coordinator) handleRetpaths(paths []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.excecutePhase == MapPhase {
 		for i := 0; i < c.NReduce; i++ {
-			c.intermediates[i] = append(c.intermediates[i], (*paths)[i])
+			c.intermediates[i] = append(c.intermediates[i], paths[i])
 		}
 	}
 }
 
 func (c *Coordinator) checkPhase() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if (c.excecutePhase == MapPhase && c.NFinished == len(c.InputFiles)) || (c.excecutePhase == ReducePhase && c.NFinished == len(c.InputFiles)+c.NReduce) {
 		c.phaseListener.Publish()
 	}
 }
 
-func (c *Coordinator) updateTaskMeta(workerId WorkerId, task Task) {
+func (c *Coordinator) updateTaskMeta(workerId WorkerId, task *Task) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	//TODO: reform:single responsibility
 	meta := c.taskMetaMap[task.Id]
 	if meta.TaskRef.State == Completed {
@@ -161,6 +162,7 @@ func (c *Coordinator) updateTaskMeta(workerId WorkerId, task Task) {
 		//initial update
 		meta.StartTime = &now
 		meta.WorkerId = &workerId
+		meta.TaskRef.State = InProgress
 	} else if stat == Completed {
 		//finishing update
 		meta.EndTime = &now
@@ -171,16 +173,17 @@ func (c *Coordinator) updateTaskMeta(workerId WorkerId, task Task) {
 }
 
 func (c *Coordinator) scanTaskStat(taskId TaskId) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	time.Sleep(time.Second * 10)
 	meta := c.taskMetaMap[taskId]
 	task := meta.TaskRef
 	if task.State == InProgress {
+		c.mu.Lock()
 		//reset task stat
 		task.State = Idle
 		meta.WorkerId = nil
 		c.taskMetaMap[taskId] = meta
+		c.phaseListener.WakeupOne()
+		c.mu.Unlock()
 	}
 }
 
@@ -224,18 +227,16 @@ func (c *Coordinator) Done() bool {
 }
 
 func (c *Coordinator) initMapTasks() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.excecutePhase != InitialPhase {
 		return
 	}
 	c.excecutePhase = MapPhase
 	for _, file := range c.InputFiles {
 		task := Task{
-			Id:            TaskId(c.taskIdGen.GenerateId()),
-			Type:          Map,
-			State:         Idle,
-			InputFileName: []string{file},
+			Id:         TaskId(c.taskIdGen.GenerateId()),
+			Type:       Map,
+			State:      Idle,
+			InputFiles: []string{file},
 		}
 		c.publishTask(&task)
 	}
@@ -243,18 +244,16 @@ func (c *Coordinator) initMapTasks() {
 
 func (c *Coordinator) initReduceTasks() {
 	//TODO:implement
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.excecutePhase != MapPhase {
 		return
 	}
 	c.excecutePhase = ReducePhase
 	for _, intermediate := range c.intermediates {
 		task := Task{
-			Id:            TaskId(c.taskIdGen.GenerateId()),
-			Type:          Reduce,
-			State:         Idle,
-			InputFileName: intermediate,
+			Id:         TaskId(c.taskIdGen.GenerateId()),
+			Type:       Reduce,
+			State:      Idle,
+			InputFiles: intermediate,
 		}
 		c.publishTask(&task)
 	}
@@ -281,7 +280,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		excecutePhase: InitialPhase,
 		taskMetaMap:   make(map[TaskId]*TaskMeta),
 		taskIdGen: &IncreasingIdGen{
-			seed: 0,
+			seed: -1,
 		},
 		workerIdGen: &IncreasingIdGen{
 			seed: 0,
@@ -293,9 +292,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	//life cycle
 	go func(c *Coordinator) {
 		c.initMapTasks()
+		fmt.Println("map init succ")
 		c.phaseListener.Subscribe()
+		fmt.Print("to reduce")
 		c.initReduceTasks()
+		fmt.Println("reduce init succ")
 		c.phaseListener.Subscribe()
+		fmt.Println("Finish normally")
 		c.excecutePhase = CompletedPhase
 	}(&c)
 

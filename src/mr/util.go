@@ -1,5 +1,12 @@
 package mr
 
+import (
+	"io/ioutil"
+	"log"
+	"os"
+	"sync"
+)
+
 func max(x int, y int) int {
 	if x > y {
 		return x
@@ -14,31 +21,60 @@ type IdGenerator interface {
 
 type IncreasingIdGen struct {
 	seed Id
+	mu   sync.Mutex
 }
 
 func (gen *IncreasingIdGen) GenerateId() Id {
+	gen.mu.Lock()
+	defer gen.mu.Unlock()
 	gen.seed++
 	return gen.seed
 }
 
 type ChanListener struct {
-	chans []*chan bool
+	cond sync.Cond
 }
 
 func (c *ChanListener) Subscribe() {
-	ch := make(chan bool, 1)
-	c.chans = append(c.chans, &ch)
-	<-ch
+	c.cond.L.Lock()
+	defer c.cond.L.Unlock()
+	c.cond.Wait()
 }
 
 func (c *ChanListener) Publish() {
-	for _, ch := range c.chans {
-		*ch <- true
-	}
+	c.cond.Broadcast()
+}
+
+func (c *ChanListener) WakeupOne() {
+	c.cond.Signal()
 }
 
 func MakeChanListener() ChanListener {
+	locker := new(sync.Mutex)
 	return ChanListener{
-		chans: make([]*chan bool, 64),
+		cond: *sync.NewCond(locker),
 	}
+}
+
+func ReadFile(filename string) []byte {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+		return nil
+	}
+	file.Close()
+	return content
+}
+
+func CreateTmpFile(dir string, filename string) *os.File {
+	file, err := ioutil.TempFile(dir, "mr-tmp-*")
+	if err != nil {
+		log.Fatal("Failed to create temp file", err)
+		return nil
+	}
+	return file
 }

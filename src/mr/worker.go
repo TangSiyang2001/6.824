@@ -2,13 +2,13 @@ package mr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"time"
+	"sort"
 )
 
 //
@@ -18,6 +18,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+//for sorting
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -34,15 +42,20 @@ func ihash(key string) int {
 //
 func StartWorker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-	workerId, nReduce := RegWorker()
+	wrr := RegWorker()
+	if wrr == nil {
+		log.Fatal("register worker failed")
+		return
+	}
+	workerId := wrr.WorkerId
+	nReduce := wrr.NReduce
+	nMap := wrr.NMap
+	retry := 0
 	for {
-		retry := 0
 		//will block if it needs to wait
 		resp := ReqForTask(workerId)
-		if resp == nil && retry < 3 {
-			retry++
-			time.Sleep(time.Microsecond * 100)
-			continue
+		if resp == nil {
+			break
 		}
 		if retry == 3 || resp.jobFinishedSig {
 			//retry for three times,if not work,worker quit
@@ -54,8 +67,13 @@ func StartWorker(mapf func(string, string) []KeyValue,
 		switch resp.Task.Type {
 		case Map:
 			retPaths, err = DoMap(mapf, &resp.Task, nReduce)
+			if retPaths == nil {
+				return
+			}
 		case Reduce:
-			err = DoReduce(reducef, &resp.Task)
+			retPath, e := DoReduce(reducef, &resp.Task, nMap)
+			err = e
+			retPaths = append(retPaths, retPath)
 		default:
 			panic("unkonwn task")
 		}
@@ -65,33 +83,34 @@ func StartWorker(mapf func(string, string) []KeyValue,
 		resp.Task.State = Completed
 		ReportTaskFinished(workerId, &resp.Task, retPaths)
 	}
-
+	fmt.Printf("worker %d exit", workerId)
 }
 
-func RegWorker() (WorkerId, int) {
+func RegWorker() *WorkerRegReply {
 	req := MakeWorkerRegArgs()
-	resp := WorkerRegReply{}
-	ok := call("Coordinator.HandleWorkerReg", &req, &resp)
+	resp := &WorkerRegReply{}
+	ok := call("Coordinator.HandleWorkerReg", &req, resp)
 	handleRpcResp(req.ReqId, ok)
-	return resp.WorkerId, resp.NReduce
+	if !ok {
+		return nil
+	}
+	return resp
 }
 
 func DoMap(mapf func(string, string) []KeyValue, task *Task, nReduce int) ([]string, error) {
-	filename := task.InputFileName[0]
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, err
+	if len(task.InputFiles) == 0 {
+		return nil, nil
 	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-		return nil, err
+	fmt.Println("------------->do map")
+	filename := task.InputFiles[0]
+	content := ReadFile(filename)
+	if content == nil {
+		return nil, errors.New("read file" + filename + "failed")
 	}
-	file.Close()
 	//execute map
 	mapRet := mapf(filename, string(content))
 	intermeidates := combile(&mapRet, nReduce)
-	return spill(&intermeidates, task.Id, nReduce), nil
+	return spill(intermeidates, task.Id, nReduce), nil
 }
 
 func combile(kvs *[]KeyValue, nReduce int) [][]KeyValue {
@@ -103,29 +122,25 @@ func combile(kvs *[]KeyValue, nReduce int) [][]KeyValue {
 	return buckets
 }
 
-func spill(kvs *[][]KeyValue, taskId TaskId, nReduce int) []string {
-	tmpPaths := make([]string, nReduce)
+func spill(kvs [][]KeyValue, taskId TaskId, nReduce int) []string {
+	tmpPaths := make([]string, 0)
 	for i := 0; i < nReduce; i++ {
-		kv := (*kvs)[i]
-		path, _ := doSpill(&kv, int(taskId), i)
+		kv := kvs[i]
+		path := doSpill(kv, int(taskId), i)
 		tmpPaths = append(tmpPaths, path)
 	}
 	return tmpPaths
 }
 
-func doSpill(content *[]KeyValue, x int, y int) (string, error) {
-	dir, _ := os.Getwd()
+func doSpill(content []KeyValue, x int, y int) string {
 	//To ensure that nobody observes partially written files in the presence of crashes,
 	//the MapReduce paper mentions the trick of using a temporary file and atomically renaming it once
 	//it is completely written. You can use ioutil.TempFile to create a temporary file and os.
 	//Rename to atomically rename it.
-	file, err := ioutil.TempFile(dir, "mr-tmp-*")
-	if err != nil {
-		log.Fatal("Failed to create temp file", err)
-		return "", err
-	}
+	dir, _ := os.Getwd()
+	file := CreateTmpFile(dir, "mr-tmp-*")
 	enc := json.NewEncoder(file)
-	for _, kv := range *content {
+	for _, kv := range content {
 		err := enc.Encode(kv)
 		if err != nil {
 			log.Fatalf("Failed to write k:%v,v:%v", kv.Key, kv.Value)
@@ -134,22 +149,72 @@ func doSpill(content *[]KeyValue, x int, y int) (string, error) {
 	file.Close()
 	outputName := fmt.Sprintf("mr-%d-%d", x, y)
 	os.Rename(file.Name(), outputName)
-	return filepath.Join(dir, outputName), nil
+	return filepath.Join(dir, outputName)
 }
 
-func DoReduce(reducef func(string, []string) string, task *Task) error {
-	//TODO:implement
-	return nil
+func DoReduce(reducef func(string, []string) string, task *Task, nMap int) (string, error) {
+	fmt.Println("------------->do reduce")
+	reduceNum := int(task.Id) - nMap
+	intermediate := readIntermedia(task.InputFiles)
+	sort.Sort(ByKey(intermediate))
+	dir, _ := os.Getwd()
+	file := CreateTmpFile(dir, "mr-tmp-out-*")
+	if file == nil {
+		return "", errors.New("create temp file failed")
+	}
+
+	//from example,execute reducef in each distinct key
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(file, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	file.Close()
+	oname := fmt.Sprintf("mr-out-%d", reduceNum)
+	os.Rename(file.Name(), oname)
+	return oname, nil
+}
+
+func readIntermedia(paths []string) []KeyValue {
+	ret := []KeyValue{}
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			log.Fatal("Failed to open file "+path, err)
+			continue
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			ret = append(ret, kv)
+		}
+		file.Close()
+	}
+	return ret
 }
 
 func ReqForTask(workerId WorkerId) *TaskReqReply {
 	//async
 	req := MakeTaskArg(workerId)
-	resp := TaskReqReply{}
-	ok := call("Coordinator.HandleTaskAssginment", &req, &resp)
+	resp := &TaskReqReply{}
+	ok := call("Coordinator.HandleTaskAssginment", &req, resp)
 	handleRpcResp(req.ReqId, ok)
 	if ok {
-		return &resp
+		return resp
 	}
 	return nil
 }
@@ -164,7 +229,7 @@ func ReportTaskFinished(workerId WorkerId, task *Task, retPaths []string) {
 
 func handleRpcResp(msgId MsgId, succ bool) {
 	if succ {
-		fmt.Printf("msg %v recieved.\n", msgId)
+		// fmt.Printf("msg %v recieved.\n", msgId)
 	} else {
 		log.Fatalf("RPC failed ,msg %v.\n", msgId)
 	}

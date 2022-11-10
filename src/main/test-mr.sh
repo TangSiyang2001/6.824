@@ -5,8 +5,8 @@
 #
 
 # comment this out to run the tests without the Go race detector.
-RACE=-race
-
+# RACE=-race
+RACE=
 if [[ "$OSTYPE" = "darwin"* ]]
 then
   if go version | grep 'go1.17.[012345]'
@@ -243,7 +243,11 @@ then
 else
   # the -n causes wait to wait for just one child process,
   # rather than waiting for all to finish.
-  wait -n
+  # wait -n
+  while [ ! -e $DF ]
+  do
+    sleep 0.2
+  done
 fi
 
 rm -f $DF
@@ -302,6 +306,13 @@ do
   $TIMEOUT ../mrworker ../../mrapps/crash.so
   sleep 1
 done
+
+# for i in `seq 1 30` 
+# do
+# {
+# 	timeout -k 2s 180s ../mrworker ../../mrapps/crash.so
+# }&
+# done 
 
 wait
 

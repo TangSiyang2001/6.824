@@ -75,8 +75,7 @@ func MakeReportArgs(workerId WorkerId, task *Task, retPaths []string) TaskReport
 }
 
 type TaskReportReply struct {
-	RespId  MsgId
-	retPath []string
+	RespId MsgId
 }
 
 type WorkerRegArgs struct {
@@ -93,6 +92,7 @@ type WorkerRegReply struct {
 	RespId MsgId
 	WorkerId
 	NReduce int
+	NMap    int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

@@ -62,18 +62,21 @@ type TaskReportArgs struct {
 	WorkerId
 	ReqId MsgId
 	Task
+	RetPaths []string
 }
 
-func MakeReportArgs(workerId WorkerId, task *Task) TaskReportArgs {
+func MakeReportArgs(workerId WorkerId, task *Task, retPaths []string) TaskReportArgs {
 	return TaskReportArgs{
 		WorkerId: workerId,
 		ReqId:    MsgId(reqIdGen.GenerateId()),
 		Task:     *task,
+		RetPaths: retPaths,
 	}
 }
 
 type TaskReportReply struct {
-	RespId MsgId
+	RespId  MsgId
+	retPath []string
 }
 
 type WorkerRegArgs struct {
@@ -89,6 +92,7 @@ func MakeWorkerRegArgs() WorkerRegArgs {
 type WorkerRegReply struct {
 	RespId MsgId
 	WorkerId
+	NReduce int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

@@ -36,10 +36,10 @@ type TaskId int
 
 //map or reduce task
 type Task struct {
-	Id        TaskId
-	Type      TaskType
-	State     TaskState
-	InputFile string
+	Id            TaskId
+	Type          TaskType
+	State         TaskState
+	InputFileName []string
 }
 
 var taskIdGen = IncreasingIdGen{
@@ -77,6 +77,7 @@ type Coordinator struct {
 	taskQueue     chan *Task
 	excecutePhase Phase
 	taskMetaMap   map[TaskId]*TaskMeta
+	intermediates [][]string
 	NFinished     int
 	taskIdGen     IdGenerator
 	workerIdGen   IdGenerator
@@ -94,6 +95,7 @@ func (c *Coordinator) HandleWorkerReg(regReq *WorkerRegArgs, regResp *WorkerRegR
 	regResp.RespId = regReq.ReqId
 	workerId := c.workerIdGen.GenerateId()
 	regResp.WorkerId = WorkerId(workerId)
+	regResp.NReduce = c.NReduce
 	return nil
 }
 
@@ -126,9 +128,18 @@ func (c *Coordinator) HandleTaskReport(req *TaskReportArgs, resp *TaskReportRepl
 	task := req.Task
 	//TODO:check if the map phase has finished
 	c.updateTaskMeta(req.WorkerId, task)
+	c.handleRetpaths(&req.RetPaths)
 	c.checkPhase()
 	resp.RespId = req.ReqId
 	return nil
+}
+
+func (c *Coordinator) handleRetpaths(paths *[]string) {
+	if c.excecutePhase == MapPhase {
+		for i := 0; i < c.NReduce; i++ {
+			c.intermediates[i] = append(c.intermediates[i], (*paths)[i])
+		}
+	}
 }
 
 func (c *Coordinator) checkPhase() {
@@ -162,16 +173,14 @@ func (c *Coordinator) updateTaskMeta(workerId WorkerId, task Task) {
 func (c *Coordinator) scanTaskStat(taskId TaskId) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for {
-		time.Sleep(time.Second * 10)
-		meta := c.taskMetaMap[taskId]
-		task := meta.TaskRef
-		if task.State == InProgress {
-			//reset task stat
-			task.State = Idle
-			meta.WorkerId = nil
-			c.taskMetaMap[taskId] = meta
-		}
+	time.Sleep(time.Second * 10)
+	meta := c.taskMetaMap[taskId]
+	task := meta.TaskRef
+	if task.State == InProgress {
+		//reset task stat
+		task.State = Idle
+		meta.WorkerId = nil
+		c.taskMetaMap[taskId] = meta
 	}
 }
 
@@ -223,22 +232,40 @@ func (c *Coordinator) initMapTasks() {
 	c.excecutePhase = MapPhase
 	for _, file := range c.InputFiles {
 		task := Task{
-			Id:        TaskId(c.taskIdGen.GenerateId()),
-			Type:      Map,
-			State:     Idle,
-			InputFile: file,
+			Id:            TaskId(c.taskIdGen.GenerateId()),
+			Type:          Map,
+			State:         Idle,
+			InputFileName: []string{file},
 		}
-		c.taskQueue <- &task
-		meta := TaskMeta{
-			TaskRef: &task,
-		}
-		c.taskMetaMap[task.Id] = &meta
+		c.publishTask(&task)
 	}
 }
 
 func (c *Coordinator) initReduceTasks() {
 	//TODO:implement
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.excecutePhase != MapPhase {
+		return
+	}
+	c.excecutePhase = ReducePhase
+	for _, intermediate := range c.intermediates {
+		task := Task{
+			Id:            TaskId(c.taskIdGen.GenerateId()),
+			Type:          Reduce,
+			State:         Idle,
+			InputFileName: intermediate,
+		}
+		c.publishTask(&task)
+	}
+}
 
+func (c *Coordinator) publishTask(task *Task) {
+	c.taskQueue <- task
+	meta := TaskMeta{
+		TaskRef: task,
+	}
+	c.taskMetaMap[task.Id] = &meta
 }
 
 //
@@ -261,6 +288,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		},
 		phaseListener: MakeChanListener(),
 		NFinished:     0,
+		intermediates: make([][]string, nReduce),
 	}
 	//life cycle
 	go func(c *Coordinator) {

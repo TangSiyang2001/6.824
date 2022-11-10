@@ -40,6 +40,7 @@ func main() {
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Fatalf("cannot open %v", filename)
+			log.Fatalf("cannot open %v", filename)
 		}
 		content, err := ioutil.ReadAll(file)
 		if err != nil {
@@ -82,8 +83,6 @@ func main() {
 
 		i = j
 	}
-
-	
 
 	ofile.Close()
 }

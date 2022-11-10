@@ -1,9 +1,13 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -28,9 +32,9 @@ func ihash(key string) int {
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
+func StartWorker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-	workerId := RegWorker()
+	workerId, nReduce := RegWorker()
 	for {
 		retry := 0
 		//will block if it needs to wait
@@ -46,10 +50,10 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 
 		var err error
-
+		var retPaths []string
 		switch resp.Task.Type {
 		case Map:
-			err = DoMap(mapf, &resp.Task)
+			retPaths, err = DoMap(mapf, &resp.Task, nReduce)
 		case Reduce:
 			err = DoReduce(reducef, &resp.Task)
 		default:
@@ -58,22 +62,79 @@ func Worker(mapf func(string, string) []KeyValue,
 		if err != nil {
 			log.Fatalf(err.Error())
 		}
-		ReportTaskFinished(workerId, &resp.Task)
+		resp.Task.State = Completed
+		ReportTaskFinished(workerId, &resp.Task, retPaths)
 	}
 
 }
 
-func RegWorker() WorkerId {
+func RegWorker() (WorkerId, int) {
 	req := MakeWorkerRegArgs()
 	resp := WorkerRegReply{}
 	ok := call("Coordinator.HandleWorkerReg", &req, &resp)
 	handleRpcResp(req.ReqId, ok)
-	return resp.WorkerId
+	return resp.WorkerId, resp.NReduce
 }
 
-func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
-	//TODO:implement
-	return nil
+func DoMap(mapf func(string, string) []KeyValue, task *Task, nReduce int) ([]string, error) {
+	filename := task.InputFileName[0]
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+		return nil, err
+	}
+	file.Close()
+	//execute map
+	mapRet := mapf(filename, string(content))
+	intermeidates := combile(&mapRet, nReduce)
+	return spill(&intermeidates, task.Id, nReduce), nil
+}
+
+func combile(kvs *[]KeyValue, nReduce int) [][]KeyValue {
+	buckets := make([][]KeyValue, nReduce)
+	for _, kv := range *kvs {
+		slot := ihash(kv.Key) % nReduce
+		buckets[slot] = append(buckets[slot], kv)
+	}
+	return buckets
+}
+
+func spill(kvs *[][]KeyValue, taskId TaskId, nReduce int) []string {
+	tmpPaths := make([]string, nReduce)
+	for i := 0; i < nReduce; i++ {
+		kv := (*kvs)[i]
+		path, _ := doSpill(&kv, int(taskId), i)
+		tmpPaths = append(tmpPaths, path)
+	}
+	return tmpPaths
+}
+
+func doSpill(content *[]KeyValue, x int, y int) (string, error) {
+	dir, _ := os.Getwd()
+	//To ensure that nobody observes partially written files in the presence of crashes,
+	//the MapReduce paper mentions the trick of using a temporary file and atomically renaming it once
+	//it is completely written. You can use ioutil.TempFile to create a temporary file and os.
+	//Rename to atomically rename it.
+	file, err := ioutil.TempFile(dir, "mr-tmp-*")
+	if err != nil {
+		log.Fatal("Failed to create temp file", err)
+		return "", err
+	}
+	enc := json.NewEncoder(file)
+	for _, kv := range *content {
+		err := enc.Encode(kv)
+		if err != nil {
+			log.Fatalf("Failed to write k:%v,v:%v", kv.Key, kv.Value)
+		}
+	}
+	file.Close()
+	outputName := fmt.Sprintf("mr-%d-%d", x, y)
+	os.Rename(file.Name(), outputName)
+	return filepath.Join(dir, outputName), nil
 }
 
 func DoReduce(reducef func(string, []string) string, task *Task) error {
@@ -93,9 +154,9 @@ func ReqForTask(workerId WorkerId) *TaskReqReply {
 	return nil
 }
 
-func ReportTaskFinished(workerId WorkerId, task *Task) {
+func ReportTaskFinished(workerId WorkerId, task *Task, retPaths []string) {
 	task.State = Completed
-	req := MakeReportArgs(workerId, task)
+	req := MakeReportArgs(workerId, task, retPaths)
 	resp := TaskReportReply{}
 	ok := call("Coordinator.HandleTaskReport", &req, &resp)
 	handleRpcResp(req.ReqId, ok)

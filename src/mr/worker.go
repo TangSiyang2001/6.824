@@ -42,6 +42,7 @@ func ihash(key string) int {
 //
 func StartWorker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+
 	wrr := RegWorker()
 	if wrr == nil {
 		log.Fatal("register worker failed")
@@ -50,22 +51,20 @@ func StartWorker(mapf func(string, string) []KeyValue,
 	workerId := wrr.WorkerId
 	nReduce := wrr.NReduce
 	nMap := wrr.NMap
+	defer fmt.Printf("worker %d exit", workerId)
 	for {
 		//will block if it needs to wait
 		resp := ReqForTask(workerId)
-		if resp == nil {
+		if resp == nil || resp.jobFinishedSig {
 			break
 		}
-		if resp.jobFinishedSig {
-			break
-		}
-
 		var err error
 		var retPaths []string
 		switch resp.Task.Type {
 		case Map:
 			retPaths, err = DoMap(mapf, &resp.Task, nReduce)
 			if retPaths == nil {
+				//means there's no execution
 				return
 			}
 		case Reduce:
@@ -81,7 +80,6 @@ func StartWorker(mapf func(string, string) []KeyValue,
 		resp.Task.State = Completed
 		ReportTaskFinished(workerId, &resp.Task, retPaths)
 	}
-	fmt.Printf("worker %d exit", workerId)
 }
 
 func RegWorker() *WorkerRegReply {

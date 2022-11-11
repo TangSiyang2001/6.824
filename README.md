@@ -14,7 +14,7 @@ centos 7.9 + go1.17.6
 
 #### Testing
 - command "wait - n" seems does not exist on centos 7,use the following command to replace it in "early exists test".
-```
+```bash
  while [ ! -e $DF ]
   do
     sleep 0.2

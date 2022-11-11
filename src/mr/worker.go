@@ -50,15 +50,13 @@ func StartWorker(mapf func(string, string) []KeyValue,
 	workerId := wrr.WorkerId
 	nReduce := wrr.NReduce
 	nMap := wrr.NMap
-	retry := 0
 	for {
 		//will block if it needs to wait
 		resp := ReqForTask(workerId)
 		if resp == nil {
 			break
 		}
-		if retry == 3 || resp.jobFinishedSig {
-			//retry for three times,if not work,worker quit
+		if resp.jobFinishedSig {
 			break
 		}
 

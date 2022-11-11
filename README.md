@@ -12,7 +12,7 @@ centos 7.9 + go1.17.6
 -  Use chan to produce and consume tasks.
 -  Use goroutine to follow each task's state as soon as it is consumed.(By Sleeping 10s and then wake up to check.)
 
-#### Testing
+#### Testing(passed all tests)
 - command "wait - n" seems does not exist on centos 7,use the following command to replace it in "early exists test".
 ```bash
  while [ ! -e $DF ]

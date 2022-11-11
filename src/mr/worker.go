@@ -101,7 +101,6 @@ func DoMap(mapf func(string, string) []KeyValue, task *Task, nReduce int) ([]str
 	if len(task.InputFiles) == 0 {
 		return nil, nil
 	}
-	fmt.Println("------------->do map")
 	filename := task.InputFiles[0]
 	content := ReadFile(filename)
 	if content == nil {
@@ -153,7 +152,6 @@ func doSpill(content []KeyValue, x int, y int) string {
 }
 
 func DoReduce(reducef func(string, []string) string, task *Task, nMap int) (string, error) {
-	fmt.Println("------------->do reduce")
 	reduceNum := int(task.Id) - nMap
 	intermediate := readIntermedia(task.InputFiles)
 	sort.Sort(ByKey(intermediate))

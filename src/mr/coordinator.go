@@ -181,8 +181,7 @@ func (c *Coordinator) scanTaskStat(taskId TaskId) {
 		//reset task stat
 		task.State = Idle
 		meta.WorkerId = nil
-		c.taskMetaMap[taskId] = meta
-		c.phaseListener.WakeupOne()
+		c.publishTask(task)
 		c.mu.Unlock()
 	}
 }
@@ -260,11 +259,11 @@ func (c *Coordinator) initReduceTasks() {
 }
 
 func (c *Coordinator) publishTask(task *Task) {
-	c.taskQueue <- task
 	meta := TaskMeta{
 		TaskRef: task,
 	}
 	c.taskMetaMap[task.Id] = &meta
+	c.taskQueue <- task
 }
 
 //
@@ -291,15 +290,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 	//life cycle
 	go func(c *Coordinator) {
+		fmt.Println("Map begin.")
 		c.initMapTasks()
-		fmt.Println("map init succ")
 		c.phaseListener.Subscribe()
-		fmt.Print("to reduce")
+		fmt.Println("reduce begin.")
 		c.initReduceTasks()
-		fmt.Println("reduce init succ")
+		fmt.Println("Start to exit.")
 		c.phaseListener.Subscribe()
-		fmt.Println("Finish normally")
 		c.excecutePhase = CompletedPhase
+		fmt.Println("Exit with code 0.")
 	}(&c)
 
 	c.server()

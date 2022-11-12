@@ -43,6 +43,7 @@ func ihash(key string) int {
 func StartWorker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
+	//init
 	wrr := RegWorker()
 	if wrr == nil {
 		log.Fatal("register worker failed")
@@ -51,7 +52,9 @@ func StartWorker(mapf func(string, string) []KeyValue,
 	workerId := wrr.WorkerId
 	nReduce := wrr.NReduce
 	nMap := wrr.NMap
-	defer fmt.Printf("worker %d exit", workerId)
+	defer fmt.Printf("worker %d exit\n", workerId)
+
+	//event cycle
 	for {
 		//will block if it needs to wait
 		resp := ReqForTask(workerId)
@@ -192,6 +195,7 @@ func readIntermedia(paths []string) []KeyValue {
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
+				log.Fatal(err)
 				break
 			}
 			ret = append(ret, kv)

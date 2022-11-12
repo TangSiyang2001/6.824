@@ -49,7 +49,7 @@ func (c *ChanListener) WakeupOne() {
 	c.cond.Signal()
 }
 
-func MakeChanListener() ChanListener {
+func NewChanListener() ChanListener {
 	locker := new(sync.Mutex)
 	return ChanListener{
 		cond: *sync.NewCond(locker),
@@ -59,19 +59,22 @@ func MakeChanListener() ChanListener {
 func ReadFile(filename string) []byte {
 	file, err := os.Open(filename)
 	if err != nil {
+		log.Fatal("cannot open"+filename, err)
 		return nil
 	}
+
 	content, err := ioutil.ReadAll(file)
+	file.Close()
+
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		log.Fatal("cannot read %v"+filename, err)
 		return nil
 	}
-	file.Close()
 	return content
 }
 
 func CreateTmpFile(dir string, filename string) *os.File {
-	file, err := ioutil.TempFile(dir, "mr-tmp-*")
+	file, err := ioutil.TempFile(dir, filename)
 	if err != nil {
 		log.Fatal("Failed to create temp file", err)
 		return nil

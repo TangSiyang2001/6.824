@@ -121,7 +121,6 @@ func (c *Coordinator) HandleTaskAssginment(taskReq *TaskReqArgs, taskResp *TaskR
 
 func (c *Coordinator) HandleTaskReport(req *TaskReportArgs, resp *TaskReportReply) error {
 	task := req.Task
-	//TODO:check if the map phase has finished
 	c.updateTaskMeta(req.WorkerId, &task)
 	c.handleRetpaths(req.RetPaths)
 	go c.checkPhase()
@@ -178,11 +177,11 @@ func (c *Coordinator) scanTaskStat(taskId TaskId) {
 	task := meta.TaskRef
 	if task.State == InProgress {
 		c.mu.Lock()
+		defer c.mu.Unlock()
 		//reset task stat
 		task.State = Idle
 		meta.WorkerId = nil
 		c.publishTask(task)
-		c.mu.Unlock()
 	}
 }
 
@@ -199,7 +198,7 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 //
 // start a thread that listens for RPCs from worker.go
 //
-func (c *Coordinator) server() {
+func (c *Coordinator) Server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
@@ -242,7 +241,6 @@ func (c *Coordinator) initMapTasks() {
 }
 
 func (c *Coordinator) initReduceTasks() {
-	//TODO:implement
 	if c.excecutePhase != MapPhase {
 		return
 	}
@@ -266,6 +264,31 @@ func (c *Coordinator) publishTask(task *Task) {
 	c.taskQueue <- task
 }
 
+func (c *Coordinator) LifeCycle() {
+	if c.excecutePhase != InitialPhase {
+		return
+	}
+	if c.InputFiles == nil {
+		log.Fatal("cannot start with empty input.")
+		return
+	}
+	go c.doLifeCycle()
+}
+
+func (c *Coordinator) doLifeCycle() {
+	fmt.Println("Map begin.")
+	c.initMapTasks()
+	c.phaseListener.Subscribe()
+
+	fmt.Println("Reduce begin.")
+	c.initReduceTasks()
+	c.phaseListener.Subscribe()
+
+	fmt.Println("Start to exit.")
+	c.excecutePhase = CompletedPhase
+	fmt.Println("Stop life cycle.")
+}
+
 //
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
@@ -284,23 +307,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		workerIdGen: &IncreasingIdGen{
 			seed: 0,
 		},
-		phaseListener: MakeChanListener(),
+		phaseListener: NewChanListener(),
 		NFinished:     0,
 		intermediates: make([][]string, nReduce),
 	}
-	//life cycle
-	go func(c *Coordinator) {
-		fmt.Println("Map begin.")
-		c.initMapTasks()
-		c.phaseListener.Subscribe()
-		fmt.Println("reduce begin.")
-		c.initReduceTasks()
-		fmt.Println("Start to exit.")
-		c.phaseListener.Subscribe()
-		c.excecutePhase = CompletedPhase
-		fmt.Println("Exit with code 0.")
-	}(&c)
 
-	c.server()
+	c.LifeCycle()
+	c.Server()
+
 	return &c
 }

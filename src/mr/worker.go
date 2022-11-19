@@ -54,7 +54,7 @@ func StartWorker(mapf func(string, string) []KeyValue,
 	nMap := wrr.NMap
 	defer fmt.Printf("worker %d exit\n", workerId)
 
-	//event cycle
+	//event loop
 	for {
 		//will block if it needs to wait
 		resp := ReqForTask(workerId)
@@ -195,7 +195,6 @@ func readIntermedia(paths []string) []KeyValue {
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
-				log.Fatal(err)
 				break
 			}
 			ret = append(ret, kv)

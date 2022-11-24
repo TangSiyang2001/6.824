@@ -20,3 +20,8 @@ centos 7.9 + go1.17.6
     sleep 0.2
   done
 ```
+
+## Lab2
+### Key points
+#### Debugging
+-  It's proved that the clear log can truely make debugging process much easier.I build a debug util under the guidance of https://blog.josejg.com/debugging-pretty/.

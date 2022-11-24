@@ -20,6 +20,3 @@ centos 7.9 + go1.17.6
     sleep 0.2
   done
 ```
-
-## Lab2
-I'm still digging in Raft to make the lab a good implementation,and will start in couple of days.

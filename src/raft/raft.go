@@ -79,7 +79,7 @@ type Raft struct {
 
 	//persistent state on all servers
 	currentTerm Term
-	votedFor    int
+	votedFor    *int
 	log         []LogEntry
 	//-------------------------------
 
@@ -208,7 +208,23 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	reply.Term = rf.currentTerm
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term >= rf.currentTerm &&
+		(rf.votedFor == nil || rf.votedFor == &args.CandidateId) &&
+		rf.isUpToDayLog(args.LastLogTerm, args.LastLogIdx) {
 
+		//TODO:Other self refresh operatrations
+		reply.VoteGranted = true
+		rf.votedFor = &args.CandidateId
+		return
+	}
+	reply.VoteGranted = false
+}
+
+func (rf *Raft) isUpToDayLog(term Term, logIdx int) bool {
+	return term > rf.currentTerm || (term == rf.currentTerm && logIdx >= rf.commitIdx)
 }
 
 //

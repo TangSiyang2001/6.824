@@ -1,5 +1,6 @@
 # 6.824
 A personal implementation of MIT 6.824.
+@See https://pdos.csail.mit.edu/6.824/schedule.html.
 
 ## environment
 centos 7.9 + go1.17.6

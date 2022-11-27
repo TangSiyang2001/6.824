@@ -1,6 +1,5 @@
 # 6.824
-A personal implementation of MIT 6.824.
-@See https://pdos.csail.mit.edu/6.824/schedule.html.
+A personal implementation of [MIT 6.824](https://pdos.csail.mit.edu/6.824/schedule.html).
 
 ## environment
 centos 7.9 + go1.17.6
@@ -25,4 +24,4 @@ centos 7.9 + go1.17.6
 ## Lab2
 ### Key points
 #### Debugging
--  It's proved that the clear log can truely make debugging process much easier.I build a debug util under the guidance of https://blog.josejg.com/debugging-pretty/.
+-  It's proved that the clear log can truely make debugging process much easier.I build a debug util under the [guidance](https://blog.josejg.com/debugging-pretty/).

@@ -215,7 +215,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *App
 }
 
 func (rf *Raft) startHeartBeat() {
-	Log(dInfo, "leader :{%v} start heartbeat", rf.me)
+	Log(dInfo, "leader :{%v} start heartbeat,term :{%v}", rf.me, rf.currentTerm)
 	for rf.role == Leader {
 		args := AppenEntriesArgs{
 			Term:     rf.currentTerm,
@@ -226,6 +226,7 @@ func (rf *Raft) startHeartBeat() {
 			Entries:      []LogEntry{},
 			LeaderCommit: rf.commitIdx,
 		}
+		stateListener := make(chan int, 1)
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
@@ -234,10 +235,22 @@ func (rf *Raft) startHeartBeat() {
 			go func(id int) {
 				//TODO:think should heartbeat rpc be retry here
 				rf.sendAppendEntries(id, &args, &reply)
+				//step down if we found a term higher than the current server
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.role = Follower
+					stateListener <- 1
+				}
 				//TODO:process reply
 			}(i)
 		}
-		time.Sleep(rf.heartBeatTimeout)
+
+		select {
+		case <-stateListener:
+			//do nothing
+		case <-time.After(rf.heartBeatTimeout):
+			//do nothing
+		}
 	}
 }
 
@@ -283,9 +296,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	if args.Term >= rf.currentTerm &&
 		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
-		// &&rf.isLogUpToDay(args.LastLogTerm, args.LastLogIdx) {
+		//TODO: &&rf.isLogUpToDay(args.LastLogTerm, args.LastLogIdx) {
 
-		Log(dInfo, "vote for candidate:{%v}", args.CandidateId)
+		Log(dInfo, "vote for candidate:{%v},term {%v}", args.CandidateId, rf.currentTerm)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
@@ -401,6 +414,7 @@ func (rf *Raft) ticker() {
 				rf.resetElecTimeout()
 				Log(dInfo, "get hearbeat")
 			case <-time.After(rf.electionTimeout):
+				rf.role = Candidate
 				rf.elect()
 			}
 		}
@@ -416,7 +430,13 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) elect() {
-	rf.role = Candidate
+	if rf.role != Candidate {
+		return
+	}
+	if rf.votedFor != -1 {
+		rf.votedFor = -1
+	}
+
 	rf.currentTerm++
 	//TODO:preprocess before an election
 	args := RequestVoteArgs{
@@ -429,12 +449,9 @@ func (rf *Raft) elect() {
 	var nVotes int = 0
 	//vote for self first
 	reply := RequestVoteReply{}
-	if rf.votedFor != -1 {
-		rf.votedFor = -1
-	}
 	rf.sendRequestVote(rf.me, &args, &reply)
 	if !reply.VoteGranted {
-		Log(dError, "fail to vote for self ,me::%v", rf.me)
+		Log(dError, "fail to vote for self ,me::%v,term::%v", rf.me, rf.currentTerm)
 		rf.role = Follower
 		return
 	}
@@ -465,7 +482,7 @@ func (rf *Raft) elect() {
 			nVotes++
 			if nVotes >= nMajority {
 				Log(dInfo, "me :{%v} will becomes leader", rf.me)
-				//election is succeed
+				//election succeeded
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				if rf.role == Candidate {

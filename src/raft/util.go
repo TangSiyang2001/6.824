@@ -12,7 +12,7 @@ import (
 //refer to https://blog.josejg.com/debugging-pretty/
 
 // Debugging
-const Debug = false
+const Debug = true
 
 type logTopic string
 

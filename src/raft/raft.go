@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -191,17 +192,21 @@ func (rf *Raft) AppendEntries(args *AppenEntriesArgs, reply *AppenEntriesReply) 
 		return
 	}
 	rf.mu.Lock()
-	if rf.role != Follower {
-		rf.role = Follower
+	defer rf.mu.Unlock()
+	if args.Term >= rf.currentTerm {
+		if rf.role != Follower {
+			rf.role = Follower
+		}
+		if rf.votedFor != -1 {
+			rf.votedFor = -1
+		}
+		rf.resetElecTimeout()
+		//We just ensure the heartbeat ability in lab 2a
+		//TODO:further log replication
+		rf.currentTerm = args.Term
+		reply.Success = true
+		reply.Term = rf.currentTerm
 	}
-	rf.mu.Unlock()
-	rf.resetElecTimeout()
-	reply.Success = false
-	reply.Term = -1
-	//We just ensure the heartbeat ability in lab 2a
-	//TODO:further log replication
-	reply.Success = true
-	reply.Term = rf.currentTerm
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *AppenEntriesReply) bool {
@@ -210,6 +215,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *App
 }
 
 func (rf *Raft) startHeartBeat() {
+	Log(dInfo, "leader :{%v} start heartbeat", rf.me)
 	for rf.role == Leader {
 		args := AppenEntriesArgs{
 			Term:     rf.currentTerm,
@@ -270,17 +276,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.killed() {
 		return
 	}
-	if rf.role != Follower {
+	if rf.role == Leader {
 		return
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term >= rf.currentTerm &&
-		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		rf.isLogUpToDay(args.LastLogTerm, args.LastLogIdx) {
+		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+		// &&rf.isLogUpToDay(args.LastLogTerm, args.LastLogIdx) {
 
+		Log(dInfo, "vote for candidate:{%v}", args.CandidateId)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.currentTerm = args.Term
 		rf.resetElecTimeout()
 		return
 	}
@@ -387,29 +395,29 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		//time.After() might be more suitable than time.Sleep()
-		for rf.role == Follower {
+		for rf.role != Leader {
 			select {
 			case <-rf.heartBeatListener:
 				rf.resetElecTimeout()
-
+				Log(dInfo, "get hearbeat")
 			case <-time.After(rf.electionTimeout):
 				rf.elect()
-				if rf.role == Leader {
-					rf.startHeartBeat()
-				}
 			}
 		}
-		if rf.role == Candidate {
-			Log(dError, "invalid state,should not be candidate here")
-			rf.Kill()
-		}
+		// if rf.role == Candidate {
+		// 	Log(dError, "invalid state,should not be candidate here")
+		// 	rf.Kill()
+		// }
 		//rf.role is Leader when arriving here
-		rf.startHeartBeat()
+		if rf.role == Leader {
+			rf.startHeartBeat()
+		}
 	}
 }
 
 func (rf *Raft) elect() {
 	rf.role = Candidate
+	rf.currentTerm++
 	//TODO:preprocess before an election
 	args := RequestVoteArgs{
 		Term:        rf.currentTerm,
@@ -421,6 +429,9 @@ func (rf *Raft) elect() {
 	var nVotes int = 0
 	//vote for self first
 	reply := RequestVoteReply{}
+	if rf.votedFor != -1 {
+		rf.votedFor = -1
+	}
 	rf.sendRequestVote(rf.me, &args, &reply)
 	if !reply.VoteGranted {
 		Log(dError, "fail to vote for self ,me::%v", rf.me)
@@ -446,21 +457,34 @@ func (rf *Raft) elect() {
 			}
 		}(i)
 	}
-	for {
+	for rf.role == Candidate {
+		timeout := rf.electionTimeout
 		select {
 		case <-votesListener:
+			timeStart := time.Now()
 			nVotes++
 			if nVotes >= nMajority {
+				Log(dInfo, "me :{%v} will becomes leader", rf.me)
 				//election is succeed
 				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				if rf.role == Candidate {
+					Log(dInfo, "me :{%v} becomes leader", rf.me)
 					rf.role = Leader
 				}
-				rf.mu.Unlock()
+				return
 			}
-		case <-time.After(rf.electionTimeout):
-			rf.role = Follower
-			return
+
+			timeout -= time.Since(timeStart)
+			if timeout <= 0 {
+				rf.elect()
+			}
+		case <-time.After(timeout):
+			//restart election
+			//TODO:check the timeout here,it won't be rf.electionTimeout every single loop
+			// rf.role = Follower
+			//retrieve to restart an election
+			rf.elect()
 		}
 	}
 }
@@ -478,16 +502,27 @@ func (rf *Raft) elect() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
+	InitLog()
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.commitIdx = 0
+	rf.currentTerm = 0
+	rf.electionTimeout = rf.newElecTimeout()
+	rf.heartBeatListener = make(chan int, 1)
+	rf.heartBeatTimeout = 100 * time.Millisecond
+	rf.lastApplied = 0
+	rf.log = []LogEntry{}
+	rf.matchIdx = []int{}
+	rf.nextIdx = []int{}
+	rf.role = Follower
+	rf.votedFor = -1
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	Log(dInfo, "init")
 	// start ticker goroutine to start elections
 	go rf.ticker()
 

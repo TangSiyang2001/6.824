@@ -100,8 +100,9 @@ type Raft struct {
 
 	//volitile state on follwers
 	//150-300ms
-	electionTimeout   time.Duration
-	heartBeatListener chan int
+	electionTimeout time.Duration
+	timeoutResetCh  chan int
+	closeCh         chan int
 	//-------------------------------
 }
 
@@ -200,12 +201,12 @@ func (rf *Raft) AppendEntries(args *AppenEntriesArgs, reply *AppenEntriesReply) 
 		if rf.votedFor != -1 {
 			rf.votedFor = -1
 		}
-		rf.resetElecTimeout()
 		//We just ensure the heartbeat ability in lab 2a
 		//TODO:further log replication
 		rf.currentTerm = args.Term
 		reply.Success = true
 		reply.Term = rf.currentTerm
+		rf.resetElecTimeout()
 	}
 }
 
@@ -216,7 +217,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *App
 
 func (rf *Raft) startHeartBeat() {
 	Log(dInfo, "leader :{%v} start heartbeat,term :{%v}", rf.me, rf.currentTerm)
-	for rf.role == Leader {
+	for !rf.killed() && rf.role == Leader {
 		args := AppenEntriesArgs{
 			Term:     rf.currentTerm,
 			LeaderId: rf.me,
@@ -297,12 +298,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term >= rf.currentTerm &&
 		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		//TODO: &&rf.isLogUpToDay(args.LastLogTerm, args.LastLogIdx) {
-
-		Log(dInfo, "vote for candidate:{%v},term {%v}", args.CandidateId, rf.currentTerm)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
 		rf.resetElecTimeout()
+		Log(dInfo, "vote for candidate:{%v},me :%v,term {%v}", args.CandidateId, rf.me, rf.currentTerm)
 		return
 	}
 }
@@ -313,6 +313,7 @@ func (rf *Raft) isLogUpToDay(logTerm Term, logIdx int) bool {
 
 func (rf *Raft) resetElecTimeout() {
 	rf.electionTimeout = rf.newElecTimeout()
+	rf.timeoutResetCh <- 1
 }
 
 func (rf *Raft) newElecTimeout() time.Duration {
@@ -392,6 +393,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	Log(dInfo, "kill %v,term : %v", rf.me, rf.currentTerm)
+	rf.closeCh <- 1
 }
 
 func (rf *Raft) killed() bool {
@@ -408,14 +411,15 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		//time.After() might be more suitable than time.Sleep()
-		for rf.role != Leader {
+		for !rf.killed() && rf.role != Leader {
 			select {
-			case <-rf.heartBeatListener:
-				rf.resetElecTimeout()
-				Log(dInfo, "get hearbeat")
+			case <-rf.timeoutResetCh:
+				Log(dInfo, "timeout reset")
 			case <-time.After(rf.electionTimeout):
 				rf.role = Candidate
 				rf.elect()
+			case <-rf.closeCh:
+				return
 			}
 		}
 		// if rf.role == Candidate {
@@ -430,6 +434,9 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) elect() {
+	if rf.killed() {
+		return
+	}
 	if rf.role != Candidate {
 		return
 	}
@@ -437,10 +444,9 @@ func (rf *Raft) elect() {
 		rf.votedFor = -1
 	}
 
-	rf.currentTerm++
 	//TODO:preprocess before an election
 	args := RequestVoteArgs{
-		Term:        rf.currentTerm,
+		Term:        rf.currentTerm + 1,
 		CandidateId: rf.me,
 		//TODO:modify in continuing labs
 		LastLogIdx:  0,
@@ -448,6 +454,7 @@ func (rf *Raft) elect() {
 	}
 	var nVotes int = 0
 	//vote for self first
+	rf.resetElecTimeout()
 	reply := RequestVoteReply{}
 	rf.sendRequestVote(rf.me, &args, &reply)
 	if !reply.VoteGranted {
@@ -455,6 +462,7 @@ func (rf *Raft) elect() {
 		rf.role = Follower
 		return
 	}
+	rf.currentTerm++
 	nVotes++
 
 	//request for vote
@@ -471,37 +479,51 @@ func (rf *Raft) elect() {
 			if reply.VoteGranted {
 				//TODO:deal with reply.Term
 				votesListener <- 1
+			} else if reply.Term > rf.currentTerm {
+				//step down
+				rf.mu.Lock()
+				rf.role = Follower
+				rf.currentTerm = reply.Term
+				votesListener <- 0
+				rf.mu.Unlock()
 			}
 		}(i)
 	}
 	for rf.role == Candidate {
 		timeout := rf.electionTimeout
 		select {
-		case <-votesListener:
-			timeStart := time.Now()
-			nVotes++
-			if nVotes >= nMajority {
-				Log(dInfo, "me :{%v} will becomes leader", rf.me)
-				//election succeeded
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				if rf.role == Candidate {
-					Log(dInfo, "me :{%v} becomes leader", rf.me)
-					rf.role = Leader
+		case v := <-votesListener:
+			if v == 1 {
+				timeStart := time.Now()
+				nVotes++
+				if nVotes >= nMajority {
+					Log(dInfo, "me :{%v} will becomes leader", rf.me)
+					//election succeeded
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if rf.role == Candidate {
+						Log(dInfo, "me :{%v} becomes leader", rf.me)
+						rf.role = Leader
+					}
+					return
 				}
+
+				timeout -= time.Since(timeStart)
+				if timeout <= 0 {
+					rf.elect()
+				}
+			} else {
+				//step down
 				return
 			}
-
-			timeout -= time.Since(timeStart)
-			if timeout <= 0 {
-				rf.elect()
-			}
-		case <-time.After(timeout):
-			//restart election
-			//TODO:check the timeout here,it won't be rf.electionTimeout every single loop
-			// rf.role = Follower
-			//retrieve to restart an election
-			rf.elect()
+		// case <-time.After(timeout):
+		// 	//restart election
+		// 	//TODO:check the timeout here,it won't be rf.electionTimeout every single loop
+		// 	// rf.role = Follower
+		// 	//retrieve to restart an election
+		// 	rf.elect()
+		case <-rf.closeCh:
+			return
 		}
 	}
 }
@@ -529,8 +551,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIdx = 0
 	rf.currentTerm = 0
 	rf.electionTimeout = rf.newElecTimeout()
-	rf.heartBeatListener = make(chan int, 1)
-	rf.heartBeatTimeout = 100 * time.Millisecond
+	rf.timeoutResetCh = make(chan int, 1)
+	rf.closeCh = make(chan int, 1)
+	rf.heartBeatTimeout = 50 * time.Millisecond
 	rf.lastApplied = 0
 	rf.log = []LogEntry{}
 	rf.matchIdx = []int{}

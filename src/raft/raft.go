@@ -72,6 +72,7 @@ type LogEntry struct {
 //
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	muCh      chan bool           // channel to release the lock
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -106,10 +107,32 @@ type Raft struct {
 	//-------------------------------
 }
 
+func (rf *Raft) lock(name string) {
+	Log(dInfo, "lock: {%v} on node {%v}", name, rf.me)
+	rf.mu.Lock()
+	go func() {
+		select {
+		case <-time.After(5 * time.Second):
+			Log(dError, "dead lock {%v} on node {%v}", name, rf.me)
+			rf.mu.Unlock()
+		case <-rf.muCh:
+		}
+	}()
+}
+
+func (rf *Raft) unlock(name string) {
+	Log(dInfo, "unlock %v on node %v", name, rf.me)
+	rf.mu.Unlock()
+	rf.muCh <- true
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
+	rf.lock("GET STATE")
+	defer rf.unlock("GET STATE")
+	Log(dSnap, "me :{%v},role :{%v},term{%v}", rf.me, rf.role, rf.currentTerm)
 	return int(rf.currentTerm), rf.role == Leader
 }
 
@@ -171,6 +194,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
+func (rf *Raft) resetElecTimeout() {
+	rf.electionTimeout = rf.newElecTimeout()
+	rf.timeoutResetCh <- 1
+}
+
+func (rf *Raft) newElecTimeout() time.Duration {
+	rand.Seed(time.Now().Unix())
+	return time.Duration(150+rand.Intn(300)) * time.Millisecond
+}
+
 //<-------------------------------------------------- AppenEntries ------------------------------------------------
 type AppenEntriesArgs struct {
 	//leader's term
@@ -189,18 +222,18 @@ type AppenEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppenEntriesArgs, reply *AppenEntriesReply) {
+	reply.Success = false
+	reply.Term = rf.currentTerm
 	if rf.killed() {
 		return
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.lock("append entries")
+	defer rf.unlock("append entries")
 	if args.Term >= rf.currentTerm {
 		if rf.role != Follower {
 			rf.role = Follower
 		}
-		if rf.votedFor != -1 {
-			rf.votedFor = -1
-		}
+		rf.unvote()
 		//We just ensure the heartbeat ability in lab 2a
 		//TODO:further log replication
 		rf.currentTerm = args.Term
@@ -211,13 +244,34 @@ func (rf *Raft) AppendEntries(args *AppenEntriesArgs, reply *AppenEntriesReply) 
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *AppenEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+	//TODO:think about rpc timeout
+	// ch := make(chan bool, 1)
+	// prev := time.Now()
+	// timeout := rf.heartBeatTimeout - 5*time.Millisecond
+	// for !rf.killed() && rf.role == Leader {
+	// 	go func() {
+	// 		ch <- rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	// 	}()
+	// 	select {
+	// 	case ok := <-ch:
+	// 		if ok {
+	// 			return true
+	// 		}
+	// 		timeout -= time.Since(prev)
+	// 		if timeout <= 0 {
+	// 			return false
+	// 		}
+	// 	case <-time.After(timeout):
+	// 		return false
+	// 	}
+	// }
+	// return false
+	return rf.peers[server].Call("Raft.AppendEntries", args, reply)
 }
 
-func (rf *Raft) startHeartBeat() {
-	Log(dInfo, "leader :{%v} start heartbeat,term :{%v}", rf.me, rf.currentTerm)
+func (rf *Raft) leaderLoop() {
 	for !rf.killed() && rf.role == Leader {
+		Log(dInfo, "leader :{%v} start heartbeat,term :{%v}", rf.me, rf.currentTerm)
 		args := AppenEntriesArgs{
 			Term:     rf.currentTerm,
 			LeaderId: rf.me,
@@ -227,36 +281,42 @@ func (rf *Raft) startHeartBeat() {
 			Entries:      []LogEntry{},
 			LeaderCommit: rf.commitIdx,
 		}
-		stateListener := make(chan int, 1)
+		stepDownCh := make(chan Term, 1)
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
-			reply := AppenEntriesReply{}
 			go func(id int) {
+				reply := AppenEntriesReply{}
 				//TODO:think should heartbeat rpc be retry here
-				rf.sendAppendEntries(id, &args, &reply)
+				ok := rf.sendAppendEntries(id, &args, &reply)
 				//step down if we found a term higher than the current server
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.role = Follower
-					stateListener <- 1
+				if ok && !reply.Success && reply.Term > rf.currentTerm {
+					//stepdown
+					stepDownCh <- reply.Term
 				}
 				//TODO:process reply
 			}(i)
 		}
 
 		select {
-		case <-stateListener:
-			//do nothing
+		case term := <-stepDownCh:
+			rf.currentTerm = term
+			rf.role = Follower
+			rf.unvote()
+			rf.resetElecTimeout()
+			//when arriving here,step down to become a follower
 		case <-time.After(rf.heartBeatTimeout):
 			//do nothing
+		case <-rf.closeCh:
+			return
 		}
 	}
 }
 
 //-----------------------------------------------------------------------------------------------------------------
 
+//----------------------------------------------- RequsetVote ---------------------------------------------
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -280,6 +340,10 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+func (rf *Raft) unvote() {
+	rf.votedFor = -1
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -293,9 +357,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.role == Leader {
 		return
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if args.Term >= rf.currentTerm &&
+	// rf.lock("req vote")
+	// defer rf.unlock("req vote")
+	if args.Term > rf.currentTerm &&
 		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		//TODO: &&rf.isLogUpToDay(args.LastLogTerm, args.LastLogIdx) {
 		reply.VoteGranted = true
@@ -303,22 +367,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.resetElecTimeout()
 		Log(dInfo, "vote for candidate:{%v},me :%v,term {%v}", args.CandidateId, rf.me, rf.currentTerm)
-		return
 	}
 }
 
 func (rf *Raft) isLogUpToDay(logTerm Term, logIdx int) bool {
 	return logTerm > rf.currentTerm || (logTerm == rf.currentTerm && logIdx >= rf.commitIdx)
-}
-
-func (rf *Raft) resetElecTimeout() {
-	rf.electionTimeout = rf.newElecTimeout()
-	rf.timeoutResetCh <- 1
-}
-
-func (rf *Raft) newElecTimeout() time.Duration {
-	rand.Seed(time.Now().Unix())
-	return time.Duration(150+rand.Intn(200)) * time.Millisecond
 }
 
 //
@@ -351,9 +404,35 @@ func (rf *Raft) newElecTimeout() time.Duration {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+
+	// ch := make(chan bool, 1)
+	// prev := time.Now()
+	// timeout := 80 * time.Millisecond
+	// for !rf.killed() && rf.role == Candidate {
+	// 	go func() {
+	// 		o := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	// 		Log(dInfo, "rpc over, node {%v},server {%v},res {%v}", rf.me, server, o)
+	// 		ch <- o
+	// 	}()
+
+	// 	select {
+	// 	case ok := <-ch:
+	// 		if ok {
+	// 			return true
+	// 		}
+	// 		timeout -= time.Since(prev)
+	// 		if timeout <= 0 {
+	// 			return false
+	// 		}
+	// 	case <-time.After(timeout):
+	// 		return false
+	// 	}
+	// }
+	// return false
+	return rf.peers[server].Call("Raft.RequestVote", args, reply)
 }
+
+//------------------------------------------------------------------------------------------------------
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -394,7 +473,7 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	Log(dInfo, "kill %v,term : %v", rf.me, rf.currentTerm)
-	rf.closeCh <- 1
+	close(rf.closeCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -411,118 +490,120 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		//time.After() might be more suitable than time.Sleep()
-		for !rf.killed() && rf.role != Leader {
-			select {
-			case <-rf.timeoutResetCh:
-				Log(dInfo, "timeout reset")
-			case <-time.After(rf.electionTimeout):
-				rf.role = Candidate
-				rf.elect()
-			case <-rf.closeCh:
-				return
-			}
-		}
-		// if rf.role == Candidate {
-		// 	Log(dError, "invalid state,should not be candidate here")
-		// 	rf.Kill()
-		// }
+		rf.nonLeaderLoop()
+
 		//rf.role is Leader when arriving here
-		if rf.role == Leader {
-			rf.startHeartBeat()
+		rf.leaderLoop()
+
+	}
+}
+
+func (rf *Raft) nonLeaderLoop() {
+	//non-leader loop
+	for !rf.killed() && rf.role != Leader {
+		electionCh := make(chan bool, 1)
+		select {
+		case <-rf.timeoutResetCh:
+		case <-time.After(rf.electionTimeout):
+			Log(dInfo, "elec timeout ,me %v", rf.me)
+			rf.role = Candidate
+			go rf.elect(&electionCh)
+		case <-electionCh:
+			//donothing,fall through to break the non-leader loop
+		case <-rf.closeCh:
+			return
 		}
 	}
 }
 
-func (rf *Raft) elect() {
+func (rf *Raft) elect(elecCh *chan bool) {
 	if rf.killed() {
 		return
 	}
+	// rf.lock("start election")
+	// defer rf.unlock("start election")
 	if rf.role != Candidate {
 		return
 	}
-	if rf.votedFor != -1 {
-		rf.votedFor = -1
-	}
+	var nVotes int = 0
+	rf.resetElecTimeout()
+	//vote for self
+	rf.votedFor = rf.me
+	rf.currentTerm++
+	nVotes++
+	defer rf.unvote()
+	defer rf.resetElecTimeout()
 
-	//TODO:preprocess before an election
+	nPeers := len(rf.peers)
+	nMajority := nPeers/2 + 1
+	voteCh := make(chan bool, nPeers)
+	stepDownCh := make(chan bool, 1)
 	args := RequestVoteArgs{
-		Term:        rf.currentTerm + 1,
+		Term:        rf.currentTerm,
 		CandidateId: rf.me,
 		//TODO:modify in continuing labs
 		LastLogIdx:  0,
 		LastLogTerm: 0,
 	}
-	var nVotes int = 0
-	//vote for self first
 	rf.resetElecTimeout()
-	reply := RequestVoteReply{}
-	rf.sendRequestVote(rf.me, &args, &reply)
-	if !reply.VoteGranted {
-		Log(dError, "fail to vote for self ,me::%v,term::%v", rf.me, rf.currentTerm)
-		rf.role = Follower
-		return
-	}
-	rf.currentTerm++
-	nVotes++
-
-	//request for vote
-	nPeers := len(rf.peers)
-	nMajority := nPeers/2 + 1
-	votesListener := make(chan int, nPeers)
 	for i := 0; i < nPeers; i++ {
 		if i == rf.me {
 			continue
 		}
-		go func(id int) {
+		go func(id int, req *RequestVoteArgs) {
 			reply := RequestVoteReply{}
-			rf.sendRequestVote(id, &args, &reply)
-			if reply.VoteGranted {
-				//TODO:deal with reply.Term
-				votesListener <- 1
-			} else if reply.Term > rf.currentTerm {
-				//step down
-				rf.mu.Lock()
-				rf.role = Follower
-				rf.currentTerm = reply.Term
-				votesListener <- 0
-				rf.mu.Unlock()
-			}
-		}(i)
-	}
-	for rf.role == Candidate {
-		timeout := rf.electionTimeout
-		select {
-		case v := <-votesListener:
-			if v == 1 {
-				timeStart := time.Now()
-				nVotes++
-				if nVotes >= nMajority {
-					Log(dInfo, "me :{%v} will becomes leader", rf.me)
-					//election succeeded
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					if rf.role == Candidate {
-						Log(dInfo, "me :{%v} becomes leader", rf.me)
-						rf.role = Leader
-					}
-					return
-				}
-
-				timeout -= time.Since(timeStart)
-				if timeout <= 0 {
-					rf.elect()
-				}
-			} else {
-				//step down
+			ok := rf.sendRequestVote(id, req, &reply)
+			if !ok {
 				return
 			}
-		// case <-time.After(timeout):
-		// 	//restart election
-		// 	//TODO:check the timeout here,it won't be rf.electionTimeout every single loop
-		// 	// rf.role = Follower
-		// 	//retrieve to restart an election
-		// 	rf.elect()
-		case <-rf.closeCh:
+			if reply.VoteGranted {
+				//TODO:deal with reply.Term
+				voteCh <- true
+			} else {
+				if reply.Term >= rf.currentTerm {
+					//update itself,and step down
+					//TODO:How to step down, and depress its election?I assume that we can change the role to Follwer
+					//and wait for a new Leader to update it.
+					stepDownCh <- true
+					return
+				}
+				voteCh <- false
+			}
+		}(i, &args)
+	}
+	//listen and write output
+	rpcTimeout := 100 * time.Millisecond
+	timeout := rpcTimeout
+	nReject := 0
+	for !rf.killed() && rf.role == Candidate {
+		now := time.Now()
+		select {
+		case v := <-voteCh:
+			if v {
+				//success
+				nVotes++
+				if nVotes >= nMajority && rf.role == Candidate {
+					rf.role = Leader
+					*elecCh <- true
+					return
+				}
+			} else {
+				nReject++
+				if nReject >= nMajority {
+					rf.role = Follower
+					return
+				}
+			}
+		case <-stepDownCh:
+			rf.role = Follower
+			return
+		case <-time.After(timeout):
+			rf.role = Follower
+			return
+		}
+		timeout -= time.Since(now)
+		if timeout <= 0 {
+			rf.role = Follower
 			return
 		}
 	}
@@ -547,13 +628,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.muCh = make(chan bool, 1)
 	// Your initialization code here (2A, 2B, 2C).
 	rf.commitIdx = 0
 	rf.currentTerm = 0
 	rf.electionTimeout = rf.newElecTimeout()
 	rf.timeoutResetCh = make(chan int, 1)
 	rf.closeCh = make(chan int, 1)
-	rf.heartBeatTimeout = 50 * time.Millisecond
+	rf.heartBeatTimeout = 80 * time.Millisecond
 	rf.lastApplied = 0
 	rf.log = []LogEntry{}
 	rf.matchIdx = []int{}

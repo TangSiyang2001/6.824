@@ -30,5 +30,5 @@ centos 7.9 + go1.17.6
 -  Be sure that election timeout is random enough.(Don't use time.Now() as a random seed,it's proved to be an awful choice when several nodes reset the election timeout at the same time).
 
 #### Testing(without failure in 3000+ times)
--  It's proved that testing with script automatically is a great choice.I built [Serial Script](https://github.com/TangSiyang2001/6.824/blob/master/src/raft/serial-test.sh) and Parallel Script.
+-  It's proved that testing with script automatically is a great choice.I built [Serial Script](https://github.com/TangSiyang2001/6.824/blob/master/src/raft/serial-test.sh) and [Parallel Script](https://github.com/TangSiyang2001/6.824/blob/master/src/raft/test-many.sh).
 

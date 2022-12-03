@@ -397,31 +397,6 @@ func (rf *Raft) isLogUpToDay(logTerm Term, logIdx int) bool {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-
-	// ch := make(chan bool, 1)
-	// prev := time.Now()
-	// timeout := 80 * time.Millisecond
-	// for !rf.killed() && rf.role == Candidate {
-	// 	go func() {
-	// 		o := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	// 		Log(dInfo, "rpc over, node {%v},server {%v},res {%v}", rf.me, server, o)
-	// 		ch <- o
-	// 	}()
-
-	// 	select {
-	// 	case ok := <-ch:
-	// 		if ok {
-	// 			return true
-	// 		}
-	// 		timeout -= time.Since(prev)
-	// 		if timeout <= 0 {
-	// 			return false
-	// 		}
-	// 	case <-time.After(timeout):
-	// 		return false
-	// 	}
-	// }
-	// return false
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }

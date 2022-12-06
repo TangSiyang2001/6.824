@@ -235,6 +235,7 @@ type AppenEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppenEntriesArgs, reply *AppenEntriesReply) {
+	//FIXME:skeptical dead lock once happended here,try to make a repetition
 	rf.lock("append entries")
 	defer rf.unlock("append entries")
 	reply.Success = false
@@ -262,21 +263,21 @@ func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *App
 func (rf *Raft) leaderLoop() {
 	for !rf.killed() && rf.role == Leader {
 		Log(dInfo, "leader :{%v} start heartbeat,term :{%v}", rf.me, rf.currentTerm)
-		args := AppenEntriesArgs{
-			Term:     rf.currentTerm,
-			LeaderId: rf.me,
-			//TODO:to be modify in continuing labs
-			PrevLogIdx:   0,
-			PrevLogTerm:  0,
-			Entries:      []LogEntry{},
-			LeaderCommit: rf.commitIdx,
-		}
 		stepDownCh := make(chan Term, 1)
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
 			go func(id int) {
+				args := AppenEntriesArgs{
+					Term:     rf.currentTerm,
+					LeaderId: rf.me,
+					//TODO:to be modify in continuing labs
+					PrevLogIdx:   0,
+					PrevLogTerm:  0,
+					Entries:      []LogEntry{},
+					LeaderCommit: rf.commitIdx,
+				}
 				reply := AppenEntriesReply{}
 				//TODO:think should heartbeat rpc be retry here
 				ok := rf.sendAppendEntries(id, &args, &reply)
@@ -467,6 +468,7 @@ func (rf *Raft) nonLeaderLoop() {
 	}
 }
 
+//<------------------------------------------ Leader election -----------------------------------
 func (rf *Raft) elect(eleCh *chan bool) {
 	rf.preElec()
 	//block until election stage finishes
@@ -537,20 +539,20 @@ func (rf *Raft) pReqVote(respCh chan *RequestVoteReply, wg *sync.WaitGroup) {
 		if i == rf.me {
 			continue
 		}
-		args := RequestVoteArgs{
-			Term:        rf.currentTerm,
-			CandidateId: rf.me,
-			//TODO:modify in continuing labs
-			LastLogIdx:  0,
-			LastLogTerm: 0,
-		}
-		reply := RequestVoteReply{
-			Term:        -1,
-			VoteGranted: false,
-		}
 		wg.Add(1)
 		go func(server int) {
 			defer wg.Done()
+			args := RequestVoteArgs{
+				Term:        rf.currentTerm,
+				CandidateId: rf.me,
+				//TODO:modify in continuing labs
+				LastLogIdx:  0,
+				LastLogTerm: 0,
+			}
+			reply := RequestVoteReply{
+				Term:        -1,
+				VoteGranted: false,
+			}
 			ok := rf.sendRequestVote(server, &args, &reply)
 			if ok {
 				Log(dVote, "node {%v} recv vote from server {%v},vote: {%v},my elec tmo:{%v}",
@@ -565,6 +567,7 @@ func (rf *Raft) pReqVote(respCh chan *RequestVoteReply, wg *sync.WaitGroup) {
 	}
 }
 
+//to become leader
 func (rf *Raft) ascend(eleCh *chan bool) {
 	rf.lock("ascend")
 	defer rf.unlock("ascend")
@@ -574,6 +577,8 @@ func (rf *Raft) ascend(eleCh *chan bool) {
 	rf.role = Leader
 	*eleCh <- true
 }
+
+//------------------------------------------------------------------------------------------------
 
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.

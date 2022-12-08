@@ -236,22 +236,23 @@ type AppenEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppenEntriesArgs, reply *AppenEntriesReply) {
 	//FIXME:skeptical dead lock once happended here,try to make a repetition
+	//TODO:try to add role identification
 	rf.lock("append entries")
 	defer rf.unlock("append entries")
 	reply.Success = false
-	reply.Term = rf.currentTerm
 	if rf.killed() {
 		reply.Term = -1
 		return
 	}
 	if args.Term >= rf.currentTerm {
 		rf.stepDown(args.Term)
+		rf.votedFor = args.LeaderId
 		//We just ensure the heartbeat ability in lab 2a
 		//TODO:further log replication
 		reply.Success = true
-		reply.Term = rf.currentTerm
 		rf.resetElecTimeout()
 	}
+	reply.Term = rf.currentTerm
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *AppenEntriesReply) bool {
@@ -261,9 +262,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppenEntriesArgs, reply *App
 }
 
 func (rf *Raft) leaderLoop() {
+	stepDownCh := make(chan Term, 1)
 	for !rf.killed() && rf.role == Leader {
 		Log(dInfo, "leader :{%v} start heartbeat,term :{%v}", rf.me, rf.currentTerm)
-		stepDownCh := make(chan Term, 1)
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
@@ -292,9 +293,10 @@ func (rf *Raft) leaderLoop() {
 
 		select {
 		case term := <-stepDownCh:
+			//when arriving here,step down to become a follower
 			rf.stepDown(term)
 			rf.resetElecTimeout()
-			//when arriving here,step down to become a follower
+			return
 		case <-time.After(rf.heartBeatTimeout):
 			//do nothing
 		case <-rf.closeCh:
@@ -357,8 +359,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = Follower
 		rf.votedFor = args.CandidateId
 		Log(dInfo, "vote for candidate:{%v},me :%v,term {%v}", args.CandidateId, rf.me, rf.currentTerm)
-	} else {
-		return
 	}
 	rf.resetElecTimeout()
 	reply.Term = rf.currentTerm
@@ -470,9 +470,15 @@ func (rf *Raft) nonLeaderLoop() {
 
 //<------------------------------------------ Leader election -----------------------------------
 func (rf *Raft) elect(eleCh *chan bool) {
-	rf.preElec()
+	rf.lock("election")
+	defer rf.unlock("election")
+	var succ bool
+	succ = rf.preElec()
+	if !succ {
+		return
+	}
 	//block until election stage finishes
-	succ := rf.doElec()
+	succ = rf.doElec()
 	if succ {
 		rf.ascend(eleCh)
 	} else {
@@ -481,16 +487,15 @@ func (rf *Raft) elect(eleCh *chan bool) {
 	}
 }
 
-func (rf *Raft) preElec() {
-	if rf.killed() {
-		return
+func (rf *Raft) preElec() bool {
+	if rf.killed() || rf.role != Follower {
+		return false
 	}
-	rf.lock("pre election")
-	defer rf.unlock("pre election")
 	rf.role = Candidate
 	//vote for self
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	return true
 }
 
 func (rf *Raft) doElec() bool {
@@ -498,11 +503,10 @@ func (rf *Raft) doElec() bool {
 	//vote from self by default
 	nVotes := 1
 
-	respCh := make(chan *RequestVoteReply, len(rf.peers))
-	rf.pReqVote(respCh, &wg)
+	respCh := make(chan RequestVoteReply, len(rf.peers))
+	rf.pReqVote(&respCh, &wg)
 
 	voteEndCh := make(chan bool, 1)
-	voteSuccCh := make(chan bool, 1)
 	go func() {
 		wg.Wait()
 		//vote stage finished
@@ -513,9 +517,6 @@ func (rf *Raft) doElec() bool {
 		for reply := range respCh {
 			if reply.VoteGranted {
 				nVotes++
-				if rf.isMajority(nVotes) {
-					voteSuccCh <- true
-				}
 			} else if reply.Term > rf.currentTerm {
 				rf.stepDown(reply.Term)
 				return
@@ -525,8 +526,6 @@ func (rf *Raft) doElec() bool {
 
 	rpcTimeout := 100 * time.Millisecond
 	select {
-	case <-voteSuccCh:
-		return true
 	case <-time.After(rpcTimeout):
 	case <-voteEndCh:
 	}
@@ -534,7 +533,7 @@ func (rf *Raft) doElec() bool {
 }
 
 //request for vote parallelly
-func (rf *Raft) pReqVote(respCh chan *RequestVoteReply, wg *sync.WaitGroup) {
+func (rf *Raft) pReqVote(respCh *chan RequestVoteReply, wg *sync.WaitGroup) {
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -561,7 +560,7 @@ func (rf *Raft) pReqVote(respCh chan *RequestVoteReply, wg *sync.WaitGroup) {
 					reply.VoteGranted,
 					rf.electionTimeout)
 
-				respCh <- &reply
+				*respCh <- reply
 			}
 		}(i)
 	}
@@ -569,13 +568,12 @@ func (rf *Raft) pReqVote(respCh chan *RequestVoteReply, wg *sync.WaitGroup) {
 
 //to become leader
 func (rf *Raft) ascend(eleCh *chan bool) {
-	rf.lock("ascend")
-	defer rf.unlock("ascend")
 	if rf.role != Candidate {
 		return
 	}
 	rf.role = Leader
 	*eleCh <- true
+	Log(dInfo, "node {%v} become leader,term: {%v}", rf.me, rf.currentTerm)
 }
 
 //------------------------------------------------------------------------------------------------

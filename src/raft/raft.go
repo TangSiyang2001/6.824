@@ -100,7 +100,7 @@ type Raft struct {
 	//-------------------------------
 
 	//volitile state on follwers
-	//150-300ms
+	//150-350ms
 	electionTimeout time.Duration
 	timeoutResetCh  chan int
 	closeCh         chan int
@@ -308,6 +308,74 @@ func (rf *Raft) leaderLoop() {
 //-----------------------------------------------------------------------------------------------------------------
 
 //----------------------------------------------- RequsetVote ---------------------------------------------
+
+//------------------------------------------------------------------------------------------------------
+
+//
+// the service using Raft (e.g. a k/v server) wants to start
+// agreement on the next command to be appended to Raft's log. if this
+// server isn't the leader, returns false. otherwise start the
+// agreement and return immediately. there is no guarantee that this
+// command will ever be committed to the Raft log, since the leader
+// may fail or lose an election. even if the Raft instance has been killed,
+// this function should return gracefully.
+//
+// the first return value is the index that the command will appear at
+// if it's ever committed. the second return value is the current
+// term. the third return value is true if this server believes it is
+// the leader.
+//
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	index := -1
+	term := -1
+	isLeader := true
+
+	// Your code here (2B).
+
+	return index, term, isLeader
+}
+
+//
+// the tester doesn't halt goroutines created by Raft after each test,
+// but it does call the Kill() method. your code can use killed() to
+// check whether Kill() has been called. the use of atomic avoids the
+// need for a lock.
+//
+// the issue is that long-running goroutines use memory and may chew
+// up CPU time, perhaps causing later tests to fail and generating
+// confusing debug output. any goroutine with a long-running loop
+// should call killed() to check whether it should stop.
+//
+func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
+	// Your code here, if desired.
+	Log(dInfo, "kill %v,role: %v,term : %v", rf.me, rf.role, rf.currentTerm)
+	close(rf.closeCh)
+}
+
+func (rf *Raft) killed() bool {
+	z := atomic.LoadInt32(&rf.dead)
+	return z == 1
+}
+
+func (rf *Raft) nonLeaderLoop() {
+	//non-leader loop
+	electionCh := make(chan bool, 1)
+	for !rf.killed() && rf.role != Leader {
+		select {
+		case <-time.After(rf.electionTimeout):
+			Log(dInfo, "elec timeout ,me %v", rf.me)
+			go rf.elect(&electionCh)
+		case <-electionCh:
+			//donothing,fall through to break the non-leader loop
+		case <-rf.timeoutResetCh:
+		case <-rf.closeCh:
+			return
+		}
+	}
+}
+
+//<------------------------------------------ Leader election -----------------------------------
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -402,73 +470,73 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-//------------------------------------------------------------------------------------------------------
-
-//
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-//
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-	return index, term, isLeader
+//prevote aims to ensure the candidate can communicate with the majority of peers
+type PrevoteArgs struct {
 }
 
-//
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-//
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-	Log(dInfo, "kill %v,role: %v,term : %v", rf.me, rf.role, rf.currentTerm)
-	close(rf.closeCh)
+type PrevoteReply struct {
+	Succ bool
 }
 
-func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
+func (rf *Raft) sendPrevote(server int, args *PrevoteArgs, reply *PrevoteReply) bool {
+	ok := rf.peers[server].Call("Raft.PreVote", args, reply)
+	return ok
 }
 
-func (rf *Raft) nonLeaderLoop() {
-	//non-leader loop
-	electionCh := make(chan bool, 1)
-	for !rf.killed() && rf.role != Leader {
-		select {
-		case <-time.After(rf.electionTimeout):
-			Log(dInfo, "elec timeout ,me %v", rf.me)
-			go rf.elect(&electionCh)
-		case <-electionCh:
-			//donothing,fall through to break the non-leader loop
-		case <-rf.timeoutResetCh:
-		case <-rf.closeCh:
-			return
+func (rf *Raft) PreVote(args *PrevoteArgs, reply *PrevoteReply) {
+	//TODO:prevote restriction
+	reply.Succ = true
+}
+
+func (rf *Raft) paraReqPreVote() bool {
+	respCh := make(chan PrevoteReply, 1)
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
 		}
+		wg.Add(1)
+		go func(server int) {
+			defer wg.Done()
+			reply := PrevoteReply{
+				Succ: false,
+			}
+			ok := rf.sendPrevote(server, &PrevoteArgs{}, &reply)
+			if ok {
+				Log(dVote, "node {%v} recv pong from server {%v}", rf.me, server)
+				respCh <- reply
+			}
+		}(i)
 	}
+	nVotes := 1
+	voteEndCh := make(chan bool, 1)
+	go func() {
+		wg.Wait()
+		//vote stage finished
+		voteEndCh <- false
+	}()
+
+	go func() {
+		for reply := range respCh {
+			if reply.Succ {
+				nVotes++
+				if rf.isMajority(nVotes) {
+					voteEndCh <- true
+				}
+			}
+		}
+	}()
+
+	rpcTimeout := 100 * time.Millisecond
+	succ := false
+	select {
+	case <-time.After(rpcTimeout):
+	case succ = <-voteEndCh:
+	}
+	return succ || rf.isMajority(nVotes)
 }
 
-//<------------------------------------------ Leader election -----------------------------------
 func (rf *Raft) elect(eleCh *chan bool) {
 	rf.lock("election")
 	defer rf.unlock("election")
@@ -482,30 +550,40 @@ func (rf *Raft) elect(eleCh *chan bool) {
 	if succ {
 		rf.ascend(eleCh)
 	} else {
-		rf.stepDown(rf.currentTerm)
+		// rf.stepDown(rf.currentTerm)
 		rf.resetElecTimeout()
 	}
 }
 
 func (rf *Raft) preElec() bool {
-	if rf.killed() || rf.role != Follower {
+	if rf.killed() || rf.role == Leader {
 		return false
 	}
-	rf.role = Candidate
-	//vote for self
-	rf.currentTerm++
-	rf.votedFor = rf.me
-	return true
+	//TODO:prevote to qualify the node
+	return rf.paraReqPreVote()
 }
 
 func (rf *Raft) doElec() bool {
-	wg := sync.WaitGroup{}
+	rf.role = Candidate
+	//vote for self
+	rf.currentTerm++
+	rf.resetElecTimeout()
+	rf.votedFor = rf.me
+
+	args := RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+		//TODO:modify in continuing labs
+		LastLogIdx:  0,
+		LastLogTerm: 0,
+	}
+	return rf.paraReqVote(args, rf.proccReqVote)
+}
+
+func (rf *Raft) proccReqVote(respCh *chan RequestVoteReply, wg *sync.WaitGroup) bool {
 	//vote from self by default
 	nVotes := 1
-
-	respCh := make(chan RequestVoteReply, len(rf.peers))
-	rf.pReqVote(&respCh, &wg)
-
+	//contains false if the election is certainly failed,or true if check is required
 	voteEndCh := make(chan bool, 1)
 	go func() {
 		wg.Wait()
@@ -514,26 +592,34 @@ func (rf *Raft) doElec() bool {
 	}()
 
 	go func() {
-		for reply := range respCh {
+		for reply := range *respCh {
 			if reply.VoteGranted {
 				nVotes++
 			} else if reply.Term > rf.currentTerm {
 				rf.stepDown(reply.Term)
+				//fast fail
+				voteEndCh <- false
 				return
 			}
 		}
 	}()
 
-	rpcTimeout := 100 * time.Millisecond
+	succ := false
+	rpcTimeout := 130 * time.Millisecond
 	select {
 	case <-time.After(rpcTimeout):
-	case <-voteEndCh:
+		succ = true
+	case succ = <-voteEndCh:
 	}
-	return rf.isMajority(nVotes)
+	return succ && rf.isMajority(nVotes)
 }
 
 //request for vote parallelly
-func (rf *Raft) pReqVote(respCh *chan RequestVoteReply, wg *sync.WaitGroup) {
+func (rf *Raft) paraReqVote(args RequestVoteArgs,
+	callback func(respCh *chan RequestVoteReply, wg *sync.WaitGroup) bool) bool {
+
+	respCh := make(chan RequestVoteReply, len(rf.peers))
+	wg := sync.WaitGroup{}
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -541,13 +627,6 @@ func (rf *Raft) pReqVote(respCh *chan RequestVoteReply, wg *sync.WaitGroup) {
 		wg.Add(1)
 		go func(server int) {
 			defer wg.Done()
-			args := RequestVoteArgs{
-				Term:        rf.currentTerm,
-				CandidateId: rf.me,
-				//TODO:modify in continuing labs
-				LastLogIdx:  0,
-				LastLogTerm: 0,
-			}
 			reply := RequestVoteReply{
 				Term:        -1,
 				VoteGranted: false,
@@ -560,10 +639,11 @@ func (rf *Raft) pReqVote(respCh *chan RequestVoteReply, wg *sync.WaitGroup) {
 					reply.VoteGranted,
 					rf.electionTimeout)
 
-				*respCh <- reply
+				respCh <- reply
 			}
 		}(i)
 	}
+	return callback(&respCh, &wg)
 }
 
 //to become leader

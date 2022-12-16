@@ -65,6 +65,8 @@ const (
 
 type Term int
 type LogEntry struct {
+	Term
+	Command interface{}
 }
 
 //
@@ -322,13 +324,21 @@ func (rf *Raft) leaderLoop() {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	// Your code here (2B).
 	index := -1
 	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-	return index, term, isLeader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.killed() || rf.role != Leader {
+		return index, term, false
+	}
+	//append log
+	log := LogEntry{
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+	rf.log = append(rf.log, log)
+	return len(rf.log), term, true
 }
 
 //

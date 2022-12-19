@@ -96,9 +96,11 @@ type Raft struct {
 	//-------------------------------
 
 	//volatile state on leaders
+	//mind that log idx start from 1
 	nextIdx          []int
 	matchIdx         []int
 	heartBeatTimeout time.Duration
+	applyCh          chan ApplyMsg
 	//-------------------------------
 
 	//volitile state on follwers
@@ -271,19 +273,28 @@ func (rf *Raft) leaderLoop() {
 			if i == rf.me {
 				continue
 			}
-			go func(id int) {
+			go func(server int) {
 				args := AppenEntriesArgs{
-					Term:     rf.currentTerm,
-					LeaderId: rf.me,
-					//TODO:to be modify in continuing labs
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
 					PrevLogIdx:   0,
 					PrevLogTerm:  0,
-					Entries:      []LogEntry{},
+					Entries:      nil,
 					LeaderCommit: rf.commitIdx,
 				}
+
+				//log replication related info
+				//log idx start from 1
+				args.Entries = rf.log[rf.nextIdx[server]-1:]
+				if rf.nextIdx[server] > 0 {
+					prevLogIdx := rf.nextIdx[server] - 1
+					args.PrevLogIdx = prevLogIdx
+					args.PrevLogTerm = rf.log[prevLogIdx-1].Term
+				}
+
 				reply := AppenEntriesReply{}
-				//TODO:think should heartbeat rpc be retry here
-				ok := rf.sendAppendEntries(id, &args, &reply)
+				//TODO:think aboutshould heartbeat rpc be retry here
+				ok := rf.sendAppendEntries(server, &args, &reply)
 				//step down if we found a term higher than the current server
 				if ok && !reply.Success && reply.Term > rf.currentTerm {
 					//stepdown
@@ -714,6 +725,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIdx = []int{}
 	rf.role = Follower
 	rf.votedFor = -1
+	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	Log(dInfo, "init")

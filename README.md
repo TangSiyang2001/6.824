@@ -2,7 +2,7 @@
 A personal implementation of [MIT 6.824](https://pdos.csail.mit.edu/6.824/schedule.html).
 
 ## environment
-centos 7.9 + go1.17.6
+WSL2 + Ubuntu20.04 + Go1.19.4
 
 ## Lab1
 ### Key points
